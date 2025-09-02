@@ -77,7 +77,7 @@ def add_band(fig, x_arr, y_upper, y_lower, fill_rgba, name, showlegend=True, leg
             name=name,
             showlegend=showlegend,
             legendgroup=legendgroup,
-            hoverinfo="skip"  # bands don't clutter hover
+            hoverinfo="skip"
         )
     )
 
@@ -344,15 +344,22 @@ if uploaded_file:
             st.plotly_chart(fig, use_container_width=True)
 
     # -------------------
-    # 3D Borehole View (original simple view)
+    # 3D Borehole View (with very light “map” base plane)
     # -------------------
     st.header("🌀 3D Borehole View (ft)")
-    limit3d = st.checkbox("Limit 3D to the same section corridor", value=True)
+    colA, colB, colC = st.columns([1,1,1])
+    with colA:
+        limit3d = st.checkbox("Limit to section corridor", value=True)
+    with colB:
+        show_plane = st.checkbox("Show light base plane", value=True)
+    with colC:
+        plane_opacity = st.slider("Base plane opacity", 0.05, 0.4, 0.15, step=0.05)
 
     data3d = data
-    if limit3d and sec is not None and not sec.empty:
+    if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
         data3d = sec
 
+    # Build traces
     lines_x, lines_y, lines_z = [], [], []
     pwr_x, pwr_y, pwr_z = [], [], []
 
@@ -365,16 +372,61 @@ if uploaded_file:
             pwr_x.append(xlon); pwr_y.append(ylat); pwr_z.append(r["PWR_EL"])
 
     fig3d = go.Figure()
+
+    # Optional light base plane (a pale rectangle under the borings)
+    if show_plane:
+        min_lon, max_lon = data3d["Longitude"].min(), data3d["Longitude"].max()
+        min_lat, max_lat = data3d["Latitude"].min(),  data3d["Latitude"].max()
+        plane_z = data3d["Bottom_EL"].min() - 5  # 5 ft below deepest bottom
+
+        # Make a thin grid so it reads like a light map
+        gx = np.linspace(min_lon, max_lon, 2)
+        gy = np.linspace(min_lat, max_lat, 2)
+        GX, GY = np.meshgrid(gx, gy)
+        ZP = np.full_like(GX, plane_z, dtype=float)
+
+        fig3d.add_trace(go.Surface(
+            x=GX, y=GY, z=ZP,
+            showscale=False,
+            opacity=plane_opacity,
+            colorscale=[[0, "#eef2f6"], [1, "#eef2f6"]],  # very light blue-gray
+            name="Base"
+        ))
+
+        # Optional subtle grid lines on the plane
+        grid_n = 12  # fixed light grid; keep simple
+        grid_x = np.linspace(min_lon, max_lon, grid_n)
+        grid_y = np.linspace(min_lat, max_lat, grid_n)
+        grid_color = "rgba(0,0,0,0.08)"
+
+        for x0 in grid_x:
+            fig3d.add_trace(go.Scatter3d(
+                x=[x0, x0], y=[min_lat, max_lat], z=[plane_z, plane_z],
+                mode="lines", line=dict(color=grid_color, width=2),
+                showlegend=False, hoverinfo="skip"
+            ))
+        for y0 in grid_y:
+            fig3d.add_trace(go.Scatter3d(
+                x=[min_lon, max_lon], y=[y0, y0], z=[plane_z, plane_z],
+                mode="lines", line=dict(color=grid_color, width=2),
+                showlegend=False, hoverinfo="skip"
+            ))
+
+    # Borehole sticks
     fig3d.add_trace(go.Scatter3d(
         x=lines_x, y=lines_y, z=lines_z,
         mode="lines", line=dict(color="black", width=2),
         name="Boring"
     ))
+
+    # Top EL markers (sky blue)
     fig3d.add_trace(go.Scatter3d(
         x=data3d["Longitude"], y=data3d["Latitude"], z=data3d["Top_EL"],
         mode="markers", marker=dict(size=4, color="rgb(135,206,250)"),
         name="Top EL (ft)"
     ))
+
+    # PWR markers (red) where present
     if pwr_x:
         fig3d.add_trace(go.Scatter3d(
             x=pwr_x, y=pwr_y, z=pwr_z,
@@ -382,5 +434,15 @@ if uploaded_file:
             name="PWR EL (ft)"
         ))
 
-    fig3d.update_layout(height=600, scene=dict(zaxis_title="Elevation (ft)"))
+    fig3d.update_layout(
+        height=600,
+        scene=dict(
+            xaxis_title="Longitude",
+            yaxis_title="Latitude",
+            zaxis_title="Elevation (ft)",
+            aspectmode="data"
+        ),
+        legend=dict(orientation="h")
+    )
+
     st.plotly_chart(fig3d, use_container_width=True)
