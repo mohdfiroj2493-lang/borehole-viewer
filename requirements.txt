@@ -5,3 +5,4 @@ folium
 plotly
 pyproj
 openpyxl
+streamlit-folium
