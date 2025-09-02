@@ -82,42 +82,6 @@ def add_band(fig, x_arr, y_upper, y_lower, fill_rgba, name, showlegend=True, leg
     )
 
 
-# ---- NEW: SciPy-free IDW interpolation ----
-def idw_grid(xp, yp, zp, GX, GY, k=8, power=2.0, eps=1e-9):
-    """
-    Inverse Distance Weighting over a grid (pure NumPy).
-    xp, yp, zp: 1D arrays of known points (feet).
-    GX, GY: meshgrid arrays defining grid (feet).
-    Returns Z on the same grid shape as GX/GY.
-    """
-    # Flatten grid
-    gx = GX.ravel()
-    gy = GY.ravel()
-    pts = np.column_stack([xp, yp])  # (N,2)
-
-    # Compute squared distances grid<->points (M,N)
-    dx = gx[:, None] - pts[:, 0][None, :]
-    dy = gy[:, None] - pts[:, 1][None, :]
-    d2 = dx * dx + dy * dy
-
-    # Handle exact coincidences (grid cell exactly at a point)
-    hit = d2.argmin(axis=1)
-    min_d2 = d2[np.arange(d2.shape[0]), hit]
-    exact_mask = min_d2 < eps
-
-    # Select k nearest for remaining cells
-    k = min(k, pts.shape[0])
-    idx_part = np.argpartition(d2, kth=k-1, axis=1)[:, :k]  # (M,k)
-    dsel = np.take_along_axis(d2, idx_part, axis=1) ** 0.5  # distances
-    w = 1.0 / (dsel ** power + eps)  # weights (M,k)
-    zsel = zp[idx_part]  # (M,k)
-    z_idw = (w * zsel).sum(axis=1) / w.sum(axis=1)
-
-    # For exact matches, use the exact point value
-    z_idw[exact_mask] = zp[hit[exact_mask]]
-    return z_idw.reshape(GX.shape)
-
-
 # -------------------------------
 # Streamlit UI
 # -------------------------------
@@ -382,91 +346,38 @@ if uploaded_file:
             st.plotly_chart(fig, use_container_width=True)
 
     # -------------------
-    # 3D View with Topography (feet) — NO SciPy
+    # 3D View (feet)
     # -------------------
-    st.header("🗺️ 3D Borehole + Terrain (ft)")
+    st.header("🌀 3D Borehole View (ft)")
     limit3d = st.checkbox("Limit 3D to the same section corridor", value=True)
-    grid_n = st.slider("Terrain grid size (N×N)", 40, 160, 90, step=10)
-    surf_opacity = st.slider("Terrain surface opacity", 0.2, 1.0, 0.75, step=0.05)
-    k_neighbors = st.slider("IDW neighbors (k)", 3, 16, 8, step=1)
-    power = st.slider("IDW power", 1.0, 4.0, 2.0, step=0.5)
 
     data3d = data
-    if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
+    if limit3d and sec is not None and not sec.empty:
         data3d = sec
 
-    # Project lon/lat to local XY in **feet**
-    transformer = get_transformer(center_lat, center_lon)
-    XY_m_all = np.array([transformer.transform(lon, lat)
-                         for lat, lon in zip(data3d["Latitude"], data3d["Longitude"])])
-    X_ft = XY_m_all[:, 0] * FT_PER_M
-    Y_ft = XY_m_all[:, 1] * FT_PER_M
-    Z_top = data3d["Top_EL"].to_numpy()
-    Z_pwr = data3d["PWR_EL"].to_numpy()
-    Z_bot = data3d["Bottom_EL"].to_numpy()
-
-    # Build grid
-    gx = np.linspace(X_ft.min(), X_ft.max(), grid_n)
-    gy = np.linspace(Y_ft.min(), Y_ft.max(), grid_n)
-    GX, GY = np.meshgrid(gx, gy)
-
-    # Interpolate topography using IDW (pure NumPy)
-    Z_surf = idw_grid(X_ft, Y_ft, Z_top, GX, GY, k=k_neighbors, power=power)
-
-    # Build 3D figure
-    fig3d = go.Figure()
-
-    # Terrain surface
-    fig3d.add_trace(go.Surface(
-        x=GX, y=GY, z=Z_surf,
-        colorscale="YlGnBu",
-        showscale=True,
-        colorbar=dict(title="Elevation (ft)"),
-        opacity=surf_opacity,
-        contours={"z": {"show": True, "usecolormap": False, "highlightcolor": "gray", "project_z": True}},
-        name="Terrain"
-    ))
-
-    # Borehole sticks
     lines_x, lines_y, lines_z = [], [], []
-    for xi, yi, zt, zb in zip(X_ft, Y_ft, Z_top, Z_bot):
-        lines_x += [xi, xi, None]
-        lines_y += [yi, yi, None]
-        lines_z += [zb, zt, None]
-    fig3d.add_trace(go.Scatter3d(
-        x=lines_x, y=lines_y, z=lines_z,
-        mode="lines", line=dict(color="black", width=3),
-        name="Boring"
-    ))
+    pwr_x, pwr_y, pwr_z = [], [], []
 
-    # Top EL markers (sky blue)
-    fig3d.add_trace(go.Scatter3d(
-        x=X_ft, y=Y_ft, z=Z_top,
-        mode="markers",
-        marker=dict(size=4, color="rgb(135,206,250)"),
-        name="Top EL (ft)"
-    ))
+    for _, r in data3d.iterrows():
+        xlon, ylat = r["Longitude"], r["Latitude"]
+        lines_x += [xlon, xlon, None]
+        lines_y += [ylat, ylat, None]
+        lines_z += [r["Bottom_EL"], r["Top_EL"], None]
+        if not pd.isna(r["PWR_EL"]):
+            pwr_x.append(xlon); pwr_y.append(ylat); pwr_z.append(r["PWR_EL"])
 
-    # PWR markers (red) where present
-    mask_pwr = ~np.isnan(Z_pwr)
-    if mask_pwr.any():
-        fig3d.add_trace(go.Scatter3d(
-            x=X_ft[mask_pwr], y=Y_ft[mask_pwr], z=Z_pwr[mask_pwr],
-            mode="markers",
-            marker=dict(size=3, color="red"),
-            name="PWR EL (ft)"
-        ))
+    fig3d = go.Figure()
+    fig3d.add_trace(go.Scatter3d(x=lines_x, y=lines_y, z=lines_z,
+                                 mode="lines", name="Boring"))
+    fig3d.add_trace(go.Scatter3d(x=data3d["Longitude"], y=data3d["Latitude"], z=data3d["Top_EL"],
+                                 mode="markers", name="Top EL"))
+    if pwr_x:
+        fig3d.add_trace(go.Scatter3d(x=pwr_x, y=pwr_y, z=pwr_z,
+                                     mode="markers", name="PWR EL"))
 
-    fig3d.update_layout(
-        height=650,
-        scene=dict(
-            xaxis_title="Easting (ft)",
-            yaxis_title="Northing (ft)",
-            zaxis_title="Elevation (ft)",
-            aspectmode="data"
-        ),
-        legend=dict(orientation="h")
-    )
-
-    fig3d.update_layout(scene_camera=dict(eye=dict(x=1.6, y=1.6, z=1.0)))
+    fig3d.update_layout(height=600, scene=dict(zaxis_title="Elevation (ft)"))
     st.plotly_chart(fig3d, use_container_width=True)
+
+
+
+now this is your final code make any change in this
