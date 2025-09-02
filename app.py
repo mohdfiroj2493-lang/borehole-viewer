@@ -82,6 +82,40 @@ def add_band(fig, x_arr, y_upper, y_lower, fill_rgba, name, showlegend=True, leg
     )
 
 
+# ---- NEW: SciPy-free IDW interpolation for terrain ----
+def idw_grid(xp, yp, zp, GX, GY, k=8, power=2.0, eps=1e-9):
+    """
+    Inverse Distance Weighting over a grid (pure NumPy).
+    xp, yp, zp: 1D arrays of known sample points (feet).
+    GX, GY: meshgrid arrays defining grid (feet).
+    Returns grid Z with same shape as GX/GY.
+    """
+    gx = GX.ravel()
+    gy = GY.ravel()
+    pts = np.column_stack([xp, yp])  # (N,2)
+
+    # distances (squared) from each grid cell to all points: (M,N)
+    dx = gx[:, None] - pts[:, 0][None, :]
+    dy = gy[:, None] - pts[:, 1][None, :]
+    d2 = dx * dx + dy * dy
+
+    # if a grid cell coincides with a sample, use that value
+    hit = d2.argmin(axis=1)
+    exact_mask = d2[np.arange(d2.shape[0]), hit] < eps
+
+    # k nearest neighbors for remaining cells
+    N = pts.shape[0]
+    kk = int(min(max(1, k), N))
+    idx_part = np.argpartition(d2, kth=kk-1, axis=1)[:, :kk]  # (M,kk)
+    dsel = np.take_along_axis(d2, idx_part, axis=1) ** 0.5
+    w = 1.0 / (dsel ** power + eps)
+    zsel = zp[idx_part]
+    z_idw = (w * zsel).sum(axis=1) / w.sum(axis=1)
+
+    z_idw[exact_mask] = zp[hit[exact_mask]]
+    return z_idw.reshape(GX.shape)
+
+
 # -------------------------------
 # Streamlit UI
 # -------------------------------
@@ -244,7 +278,7 @@ if uploaded_file:
         if sec.empty:
             st.warning("No borings fall within the selected corridor width. Widen the corridor or redraw the line.")
         else:
-            # ---- Filled-band profile (single Rock legend; unified hover) ----
+            # ---- Filled-band profile (single PWR legend; unified hover) ----
             x   = sec["Chainage_ft"].to_numpy()
             top = sec["Top_EL"].to_numpy()
             bot = sec["Bottom_EL"].to_numpy()
@@ -252,13 +286,13 @@ if uploaded_file:
 
             fig = go.Figure()
 
-            # Soil (green): Top -> (PWR if present else Bottom)  [one legend item]
+            # Soil (green): Top -> (PWR if present else Bottom)
             lower_soil = np.where(np.isnan(pwr), bot, pwr)
             add_band(fig, x, top, lower_soil, "rgba(34,197,94,0.55)", "Soil", True, "soil")
 
-            # Rock (maroon): PWR -> Bottom  [single legend entry even if many segments]
+            # PWR (maroon): PWR -> Bottom  [single legend entry even if many segments]
             mask = ~np.isnan(pwr)
-            first_rock = True
+            first_pwr_band = True
             if mask.any():
                 idx = np.where(mask)[0]
                 splits = np.where(np.diff(idx) > 1)[0]
@@ -268,8 +302,8 @@ if uploaded_file:
                     y_up = pwr[seg]
                     y_lo = bot[seg]
                     add_band(fig, xs, y_up, y_lo, "rgba(127,29,29,0.70)",
-                             "PWR", showlegend=first_rock, legendgroup="rock")
-                    first_rock = False
+                             "PWR", showlegend=first_pwr_band, legendgroup="pwrband")
+                    first_pwr_band = False
 
             # Vertical posts at each boring
             for xi, ytop, ybot in zip(x, top, bot):
@@ -298,8 +332,7 @@ if uploaded_file:
 
             # PWR line (dashed) & markers ONLY where PWR exists
             if mask.any():
-                # dashed line segments (no hover), ONE legend item
-                first_pwr = True
+                first_pwr_line = True
                 idx = np.where(mask)[0]
                 splits = np.where(np.diff(idx) > 1)[0]
                 segments = np.split(idx, splits + 1)
@@ -309,12 +342,11 @@ if uploaded_file:
                         x=xs, y=ys, mode="lines",
                         line=dict(color="black", width=1, dash="dot"),
                         name="PWR EL (ft)",
-                        showlegend=first_pwr,
+                        showlegend=first_pwr_line,
                         hoverinfo="skip",
                         legendgroup="pwr"
                     ))
-                    first_pwr = False
-                # markers carry the hover text (only at real PWR points)
+                    first_pwr_line = False
                 fig.add_trace(go.Scatter(
                     x=x[mask], y=pwr[mask], mode="markers",
                     marker=dict(size=4, color="black"),
@@ -346,38 +378,90 @@ if uploaded_file:
             st.plotly_chart(fig, use_container_width=True)
 
     # -------------------
-    # 3D View (feet)
+    # 3D View with Terrain (feet) — no SciPy required
     # -------------------
-    st.header("🌀 3D Borehole View (ft)")
+    st.header("🗺️ 3D Borehole + Terrain (ft)")
     limit3d = st.checkbox("Limit 3D to the same section corridor", value=True)
+    grid_n = st.slider("Terrain grid size (N×N)", 40, 160, 90, step=10)
+    surf_opacity = st.slider("Terrain surface opacity", 0.2, 1.0, 0.75, step=0.05)
+    k_neighbors = st.slider("IDW neighbors (k)", 3, 16, 8, step=1)
+    power = st.slider("IDW power", 1.0, 4.0, 2.0, step=0.5)
 
     data3d = data
-    if limit3d and sec is not None and not sec.empty:
+    if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
         data3d = sec
 
-    lines_x, lines_y, lines_z = [], [], []
-    pwr_x, pwr_y, pwr_z = [], [], []
+    # Project lon/lat to local XY in **feet**
+    transformer = get_transformer(center_lat, center_lon)
+    XY_m_all = np.array([transformer.transform(lon, lat)
+                         for lat, lon in zip(data3d["Latitude"], data3d["Longitude"])])
+    X_ft = XY_m_all[:, 0] * FT_PER_M
+    Y_ft = XY_m_all[:, 1] * FT_PER_M
+    Z_top = data3d["Top_EL"].to_numpy()
+    Z_pwr = data3d["PWR_EL"].to_numpy()
+    Z_bot = data3d["Bottom_EL"].to_numpy()
 
-    for _, r in data3d.iterrows():
-        xlon, ylat = r["Longitude"], r["Latitude"]
-        lines_x += [xlon, xlon, None]
-        lines_y += [ylat, ylat, None]
-        lines_z += [r["Bottom_EL"], r["Top_EL"], None]
-        if not pd.isna(r["PWR_EL"]):
-            pwr_x.append(xlon); pwr_y.append(ylat); pwr_z.append(r["PWR_EL"])
+    # Interpolation grid
+    gx = np.linspace(X_ft.min(), X_ft.max(), grid_n)
+    gy = np.linspace(Y_ft.min(), Y_ft.max(), grid_n)
+    GX, GY = np.meshgrid(gx, gy)
 
+    # Terrain from top elevations via IDW
+    Z_surf = idw_grid(X_ft, Y_ft, Z_top, GX, GY, k=k_neighbors, power=power)
+
+    # Build 3D terrain + borings
     fig3d = go.Figure()
-    fig3d.add_trace(go.Scatter3d(x=lines_x, y=lines_y, z=lines_z,
-                                 mode="lines", name="Boring"))
-    fig3d.add_trace(go.Scatter3d(x=data3d["Longitude"], y=data3d["Latitude"], z=data3d["Top_EL"],
-                                 mode="markers", name="Top EL"))
-    if pwr_x:
-        fig3d.add_trace(go.Scatter3d(x=pwr_x, y=pwr_y, z=pwr_z,
-                                     mode="markers", name="PWR EL"))
 
-    fig3d.update_layout(height=600, scene=dict(zaxis_title="Elevation (ft)"))
+    fig3d.add_trace(go.Surface(
+        x=GX, y=GY, z=Z_surf,
+        colorscale="YlGnBu",
+        showscale=True,
+        colorbar=dict(title="Elevation (ft)"),
+        opacity=surf_opacity,
+        contours={"z": {"show": True, "usecolormap": False, "highlightcolor": "gray", "project_z": True}},
+        name="Terrain"
+    ))
+
+    # Borehole sticks
+    lines_x, lines_y, lines_z = [], [], []
+    for xi, yi, zt, zb in zip(X_ft, Y_ft, Z_top, Z_bot):
+        lines_x += [xi, xi, None]
+        lines_y += [yi, yi, None]
+        lines_z += [zb, zt, None]
+    fig3d.add_trace(go.Scatter3d(
+        x=lines_x, y=lines_y, z=lines_z,
+        mode="lines", line=dict(color="black", width=3),
+        name="Boring"
+    ))
+
+    # Top EL (sky blue)
+    fig3d.add_trace(go.Scatter3d(
+        x=X_ft, y=Y_ft, z=Z_top,
+        mode="markers",
+        marker=dict(size=4, color="rgb(135,206,250)"),
+        name="Top EL (ft)"
+    ))
+
+    # PWR EL (red) where present
+    mask_pwr = ~np.isnan(Z_pwr)
+    if mask_pwr.any():
+        fig3d.add_trace(go.Scatter3d(
+            x=X_ft[mask_pwr], y=Y_ft[mask_pwr], z=Z_pwr[mask_pwr],
+            mode="markers",
+            marker=dict(size=3, color="red"),
+            name="PWR EL (ft)"
+        ))
+
+    fig3d.update_layout(
+        height=650,
+        scene=dict(
+            xaxis_title="Easting (ft)",
+            yaxis_title="Northing (ft)",
+            zaxis_title="Elevation (ft)",
+            aspectmode="data"
+        ),
+        legend=dict(orientation="h")
+    )
+    fig3d.update_layout(scene_camera=dict(eye=dict(x=1.6, y=1.6, z=1.0)))
+
     st.plotly_chart(fig3d, use_container_width=True)
-
-
-
-now this is your final code make any change in this
