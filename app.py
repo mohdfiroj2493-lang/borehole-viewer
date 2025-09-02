@@ -128,6 +128,7 @@ if uploaded_file:
     for _, r in data.iterrows():
         popup = f"<b>{r['Name']}</b><br>Top EL: {r['Top_EL']:.2f}<br>PWR EL: {r['PWR_EL'] if pd.notna(r['PWR_EL']) else 'N/A'}<br>Bottom EL: {r['Bottom_EL']:.2f}"
         
+        # Circle marker with tooltip
         folium.CircleMarker(
             location=[r["Latitude"], r["Longitude"]],
             radius=6,
@@ -138,10 +139,21 @@ if uploaded_file:
             tooltip=r["Name"]
         ).add_to(m)
 
+        # Always visible text label (one line, slightly below circle)
         folium.map.Marker(
             [r["Latitude"], r["Longitude"]],
             icon=folium.DivIcon(
-                html=f"""<div style="font-size: 10pt; color: black">{r['Name']}</div>"""
+                html=f"""
+                <div style="
+                    font-size: 10pt;
+                    color: black;
+                    white-space: nowrap;
+                    text-align: center;
+                    transform: translateY(12px);
+                ">
+                {r['Name']}
+                </div>
+                """
             )
         ).add_to(m)
 
