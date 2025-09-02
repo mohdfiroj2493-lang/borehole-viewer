@@ -6,7 +6,6 @@ import plotly.graph_objects as go
 from pyproj import CRS, Transformer
 import streamlit as st
 from streamlit_folium import st_folium
-from scipy.interpolate import griddata  # NEW
 
 FT_PER_M = 3.280839895  # meters -> feet
 
@@ -81,6 +80,42 @@ def add_band(fig, x_arr, y_upper, y_lower, fill_rgba, name, showlegend=True, leg
             hoverinfo="skip"  # bands don't clutter hover
         )
     )
+
+
+# ---- NEW: SciPy-free IDW interpolation ----
+def idw_grid(xp, yp, zp, GX, GY, k=8, power=2.0, eps=1e-9):
+    """
+    Inverse Distance Weighting over a grid (pure NumPy).
+    xp, yp, zp: 1D arrays of known points (feet).
+    GX, GY: meshgrid arrays defining grid (feet).
+    Returns Z on the same grid shape as GX/GY.
+    """
+    # Flatten grid
+    gx = GX.ravel()
+    gy = GY.ravel()
+    pts = np.column_stack([xp, yp])  # (N,2)
+
+    # Compute squared distances grid<->points (M,N)
+    dx = gx[:, None] - pts[:, 0][None, :]
+    dy = gy[:, None] - pts[:, 1][None, :]
+    d2 = dx * dx + dy * dy
+
+    # Handle exact coincidences (grid cell exactly at a point)
+    hit = d2.argmin(axis=1)
+    min_d2 = d2[np.arange(d2.shape[0]), hit]
+    exact_mask = min_d2 < eps
+
+    # Select k nearest for remaining cells
+    k = min(k, pts.shape[0])
+    idx_part = np.argpartition(d2, kth=k-1, axis=1)[:, :k]  # (M,k)
+    dsel = np.take_along_axis(d2, idx_part, axis=1) ** 0.5  # distances
+    w = 1.0 / (dsel ** power + eps)  # weights (M,k)
+    zsel = zp[idx_part]  # (M,k)
+    z_idw = (w * zsel).sum(axis=1) / w.sum(axis=1)
+
+    # For exact matches, use the exact point value
+    z_idw[exact_mask] = zp[hit[exact_mask]]
+    return z_idw.reshape(GX.shape)
 
 
 # -------------------------------
@@ -347,12 +382,14 @@ if uploaded_file:
             st.plotly_chart(fig, use_container_width=True)
 
     # -------------------
-    # 3D View with Topography (feet)
+    # 3D View with Topography (feet) — NO SciPy
     # -------------------
     st.header("🗺️ 3D Borehole + Terrain (ft)")
     limit3d = st.checkbox("Limit 3D to the same section corridor", value=True)
     grid_n = st.slider("Terrain grid size (N×N)", 40, 160, 90, step=10)
     surf_opacity = st.slider("Terrain surface opacity", 0.2, 1.0, 0.75, step=0.05)
+    k_neighbors = st.slider("IDW neighbors (k)", 3, 16, 8, step=1)
+    power = st.slider("IDW power", 1.0, 4.0, 2.0, step=0.5)
 
     data3d = data
     if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
@@ -368,16 +405,13 @@ if uploaded_file:
     Z_pwr = data3d["PWR_EL"].to_numpy()
     Z_bot = data3d["Bottom_EL"].to_numpy()
 
-    # Build interpolation grid
+    # Build grid
     gx = np.linspace(X_ft.min(), X_ft.max(), grid_n)
     gy = np.linspace(Y_ft.min(), Y_ft.max(), grid_n)
     GX, GY = np.meshgrid(gx, gy)
 
-    # Interpolate topography (linear, fall back to nearest for gaps)
-    points = np.column_stack([X_ft, Y_ft])
-    Z_lin = griddata(points, Z_top, (GX, GY), method="linear")
-    Z_nn  = griddata(points, Z_top, (GX, GY), method="nearest")
-    Z_surf = np.where(np.isnan(Z_lin), Z_nn, Z_lin)
+    # Interpolate topography using IDW (pure NumPy)
+    Z_surf = idw_grid(X_ft, Y_ft, Z_top, GX, GY, k=k_neighbors, power=power)
 
     # Build 3D figure
     fig3d = go.Figure()
@@ -434,6 +468,5 @@ if uploaded_file:
         legend=dict(orientation="h")
     )
 
-    # Nice camera angle
     fig3d.update_layout(scene_camera=dict(eye=dict(x=1.6, y=1.6, z=1.0)))
     st.plotly_chart(fig3d, use_container_width=True)
