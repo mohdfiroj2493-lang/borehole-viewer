@@ -61,7 +61,7 @@ def project_chainage_to_polyline(XY_m, poly_xy_m):
     return chain_m * FT_PER_M, dist_m * FT_PER_M, cum_m[-1] * FT_PER_M
 
 
-def add_band(fig, x_arr, y_upper, y_lower, fill_rgba, name, showlegend=True, legendgroup=None):
+def add_band(fig, x_arr, y_upper, y_lower, fill_rgba, name):
     """Add a filled band polygon between y_upper and y_lower along x_arr."""
     if len(x_arr) < 2:
         return
@@ -75,9 +75,8 @@ def add_band(fig, x_arr, y_upper, y_lower, fill_rgba, name, showlegend=True, leg
             fill="toself",
             fillcolor=fill_rgba,
             name=name,
-            showlegend=showlegend,
-            legendgroup=legendgroup,
-            hoverinfo="skip"  # keep tooltips clean
+            hoverinfo="skip",
+            showlegend=True
         )
     )
 
@@ -244,92 +243,55 @@ if uploaded_file:
         if sec.empty:
             st.warning("No borings fall within the selected corridor width. Widen the corridor or redraw the line.")
         else:
-            # ---- Filled-band profile (single Rock legend; formatted unified tooltip) ----
-            x   = sec["Chainage_ft"].to_numpy()
+            # ---- Filled-band profile like your example ----
+            x = sec["Chainage_ft"].to_numpy()
             top = sec["Top_EL"].to_numpy()
             bot = sec["Bottom_EL"].to_numpy()
             pwr = sec["PWR_EL"].to_numpy()  # may include NaNs
 
             fig = go.Figure()
 
-            # Overburden (Top → PWR or Bottom)
+            # Overburden (green): Top -> (PWR if present else Bottom)
             lower_overburden = np.where(np.isnan(pwr), bot, pwr)
-            add_band(fig, x, top, lower_overburden, "rgba(34,197,94,0.55)", "Overburden", True, "overburden")
+            add_band(fig, x, top, lower_overburden, "rgba(34,197,94,0.55)", "Overburden")
 
-            # Rock (PWR → Bottom) — single legend entry
+            # Rock (maroon): only where PWR exists -> Bottom
             mask = ~np.isnan(pwr)
-            first_rock = True
             if mask.any():
                 idx = np.where(mask)[0]
                 splits = np.where(np.diff(idx) > 1)[0]
                 segments = np.split(idx, splits + 1)
                 for seg in segments:
-                    xs  = x[seg]
+                    xs = x[seg]
                     y_up = pwr[seg]
                     y_lo = bot[seg]
-                    add_band(fig, xs, y_up, y_lo, "rgba(127,29,29,0.70)", "Rock",
-                             showlegend=first_rock, legendgroup="rock")
-                    first_rock = False
+                    add_band(fig, xs, y_up, y_lo, "rgba(127,29,29,0.70)", "Rock")
 
-            # Vertical posts at each boring
+            # Black vertical posts at borings
             for xi, ytop, ybot in zip(x, top, bot):
-                fig.add_trace(go.Scatter(
-                    x=[xi, xi], y=[ybot, ytop],
-                    mode="lines",
-                    line=dict(color="black", width=2),
-                    showlegend=False,
-                    hoverinfo="skip"
-                ))
+                fig.add_trace(go.Scatter(x=[xi, xi], y=[ybot, ytop],
+                                         mode="lines", line=dict(color="black", width=2),
+                                         showlegend=False, hoverinfo="skip"))
 
-            # Top & Bottom outlines (clean hover text)
-            fig.add_trace(go.Scatter(
-                x=x, y=top, mode="lines+markers",
-                line=dict(color="black", width=1),
-                marker=dict(size=5, color="black"),
-                name="Top EL (ft)", legendgroup="top",
-                hovertemplate="Top EL (ft): %{y:.2f}<extra></extra>"
-            ))
-            fig.add_trace(go.Scatter(
-                x=x, y=bot, mode="lines",
-                line=dict(color="black", width=1),
-                name="Bottom EL (ft)", legendgroup="bottom",
-                hovertemplate="Bottom EL (ft): %{y:.2f}<extra></extra>"
-            ))
+            # Outline lines (thin black)
+            fig.add_trace(go.Scatter(x=x, y=top, mode="lines+markers",
+                                     line=dict(color="black", width=1),
+                                     marker=dict(size=5, color="black"),
+                                     name="Top EL (ft)"))
+            if np.any(~np.isnan(pwr)):
+                fig.add_trace(go.Scatter(x=x, y=pwr, mode="lines+markers",
+                                         line=dict(color="black", width=1, dash="dot"),
+                                         marker=dict(size=4, color="black"),
+                                         name="PWR EL (ft)"))
+            fig.add_trace(go.Scatter(x=x, y=bot, mode="lines",
+                                     line=dict(color="black", width=1),
+                                     name="Bottom EL (ft)"))
 
-            # PWR line (dashed) & markers ONLY where PWR exists
-            if mask.any():
-                # dashed line segments, one legend item, no hover on line
-                first_pwr = True
-                idx = np.where(mask)[0]
-                splits = np.where(np.diff(idx) > 1)[0]
-                segments = np.split(idx, splits + 1)
-                for seg in segments:
-                    xs = x[seg]; ys = pwr[seg]
-                    fig.add_trace(go.Scatter(
-                        x=xs, y=ys, mode="lines",
-                        line=dict(color="black", width=1, dash="dot"),
-                        name="PWR EL (ft)", legendgroup="pwr",
-                        showlegend=first_pwr,
-                        hoverinfo="skip"
-                    ))
-                    first_pwr = False
-                # markers carry hover text at real PWR points
-                fig.add_trace(go.Scatter(
-                    x=x[mask], y=pwr[mask], mode="markers",
-                    marker=dict(size=4, color="black"),
-                    name="PWR EL (ft)", legendgroup="pwr",
-                    showlegend=False,
-                    hovertemplate="PWR EL (ft): %{y:.2f}<extra></extra>"
-                ))
-
-            # Borehole labels
+            # Name annotations above top surface
             for xi, yi, label in zip(x, top, sec["Name"]):
-                fig.add_annotation(
-                    x=xi, y=yi, text=str(label),
-                    showarrow=True, arrowhead=1, arrowsize=1, ax=0, ay=-25
-                )
+                fig.add_annotation(x=xi, y=yi, text=str(label),
+                                   showarrow=True, arrowhead=1, arrowsize=1, ax=0, ay=-25)
 
-            # Unified vertical tooltip + spike (matches your example)
             fig.update_layout(
                 title=f"Section along drawn line (Length ≈ {total_len_ft:.0f} ft, corridor ±{corridor_ft} ft)",
                 xaxis_title="Chainage (ft)",
@@ -338,9 +300,6 @@ if uploaded_file:
                 hovermode="x unified",
                 legend=dict(orientation="h"),
             )
-            fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor",
-                             spikethickness=1, spikedash="dot")
-
             st.plotly_chart(fig, use_container_width=True)
 
     # -------------------
