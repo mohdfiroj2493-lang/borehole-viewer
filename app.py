@@ -7,7 +7,8 @@ from pyproj import CRS, Transformer
 import streamlit as st
 from streamlit_folium import st_folium
 
-FT_PER_M = 3.280839895  # exact conversion
+FT_PER_M = 3.280839895  # meters -> feet
+
 
 # -------------------------------
 # Helpers
@@ -19,17 +20,19 @@ def pick(colnames, *aliases):
             return a
     return None
 
+
 def get_transformer(lat, lon):
-    # Use a local UTM (meters) then convert results to feet
+    """Pick a local UTM projection for accurate XY distances (meters)."""
     zone = int((lon + 180) // 6) + 1
     crs_target = CRS.from_string(f"+proj=utm +zone={zone} +datum=WGS84 +units=m +no_defs")
     return Transformer.from_crs("EPSG:4326", crs_target, always_xy=True)
 
+
 def project_chainage_to_polyline(XY_m, poly_xy_m):
     """
-    XY_m: Nx2 in meters
-    poly_xy_m: Mx2 in meters
-    Returns: chain_ft, dist_ft, total_len_ft
+    XY_m: Nx2 in meters (points)
+    poly_xy_m: Mx2 in meters (polyline vertices)
+    Returns (in feet): chain_ft, dist_ft, total_len_ft
     """
     seg_vecs = poly_xy_m[1:] - poly_xy_m[:-1]
     seg_len_m = np.linalg.norm(seg_vecs, axis=1)
@@ -55,8 +58,27 @@ def project_chainage_to_polyline(XY_m, poly_xy_m):
         chain_m[i] = best_ch
         dist_m[i] = best_d
 
-    # Convert outputs to feet
     return chain_m * FT_PER_M, dist_m * FT_PER_M, cum_m[-1] * FT_PER_M
+
+
+def add_band(fig, x_arr, y_upper, y_lower, fill_rgba, name):
+    """Add a filled band polygon between y_upper and y_lower along x_arr."""
+    if len(x_arr) < 2:
+        return
+    x_closed = np.concatenate([x_arr, x_arr[::-1]])
+    y_closed = np.concatenate([y_upper, y_lower[::-1]])
+    fig.add_trace(
+        go.Scatter(
+            x=x_closed, y=y_closed,
+            mode="lines",
+            line=dict(color="black", width=1),
+            fill="toself",
+            fillcolor=fill_rgba,
+            name=name,
+            hoverinfo="skip",
+            showlegend=True
+        )
+    )
 
 
 # -------------------------------
@@ -64,7 +86,7 @@ def project_chainage_to_polyline(XY_m, poly_xy_m):
 # -------------------------------
 st.set_page_config(page_title="Borehole Viewer", layout="wide")
 st.title("📍 Borehole Visualization Tool")
-st.caption("Upload your Excel bore log data, draw a section on the map, and generate the profile & 3D view. All units shown in feet.")
+st.caption("Upload your Excel, draw a section on the map, then generate a filled profile and 3D view. All units shown in **feet**.")
 
 uploaded_file = st.file_uploader("Upload Excel file", type=["xls", "xlsx"])
 
@@ -72,7 +94,7 @@ if uploaded_file:
     df = pd.read_excel(uploaded_file)
     df.columns = [c.strip().lower() for c in df.columns]
 
-    # Columns
+    # Columns (case-insensitive aliases)
     c_name   = pick(df.columns, 'name', 'id', 'boring id', 'hole id')
     c_lat    = pick(df.columns, 'latitude', 'lat')
     c_lon    = pick(df.columns, 'longitude', 'lon', 'long')
@@ -81,6 +103,7 @@ if uploaded_file:
     c_pwr_d  = pick(df.columns, 'pwr depth', 'weathered rock depth')
     c_pwr_el = pick(df.columns, 'pwr el', 'pwr elevation', 'weathered rock elevation')
 
+    # Build dataframe (all elevations/depths assumed feet from Excel)
     data = pd.DataFrame({
         'Name': df[c_name],
         'Latitude': df[c_lat],
@@ -88,17 +111,15 @@ if uploaded_file:
         'Top_EL': pd.to_numeric(df[c_top], errors="coerce"),
         'Depth':  pd.to_numeric(df[c_depth], errors="coerce"),
     })
-
-    data['Bottom_EL'] = data['Top_EL'] - data['Depth']  # feet - feet
+    data['Bottom_EL'] = data['Top_EL'] - data['Depth']
     data['PWR_EL'] = np.nan
-
     if c_pwr_el:
         data['PWR_EL'] = pd.to_numeric(df[c_pwr_el], errors="coerce")
     if c_pwr_d:
         pwr_d = pd.to_numeric(df[c_pwr_d], errors="coerce")
-        data['PWR_EL'] = data['PWR_EL'].fillna(data['Top_EL'] - pwr_d)  # compute in feet
+        data['PWR_EL'] = data['PWR_EL'].fillna(data['Top_EL'] - pwr_d)
 
-    # Remove rows without coords
+    # Clean
     data = data.dropna(subset=["Latitude", "Longitude"]).reset_index(drop=True)
     if data.empty:
         st.error("No valid rows with Latitude/Longitude found.")
@@ -109,12 +130,12 @@ if uploaded_file:
     # -------------------
     st.header("🌍 Map — Draw your section line")
     with st.expander("Tip", expanded=True):
-        st.write("Use the **polyline** tool to draw your section. Double-click to finish. Elevations are in **ft**. Corridor width slider is **ft**.")
+        st.write("Use the **polyline tool** on the map to draw your section. Double-click to finish. Popups/labels are in **ft**.")
 
     center_lat, center_lon = data["Latitude"].mean(), data["Longitude"].mean()
     m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True)
 
-    # Base layers with attribution
+    # Basemaps (with attributions)
     folium.TileLayer("OpenStreetMap", name="Street Map").add_to(m)
     folium.TileLayer(
         tiles="https://stamen-tiles.a.ssl.fastly.net/terrain/{z}/{x}/{y}.jpg",
@@ -144,7 +165,7 @@ if uploaded_file:
         control=True
     ).add_to(m)
 
-    # Boreholes (feet in popup labels)
+    # Borehole markers + labels
     for _, r in data.iterrows():
         popup = (
             f"<b>{r['Name']}</b><br>"
@@ -178,16 +199,18 @@ if uploaded_file:
     folium.LayerControl().add_to(m)
 
     map_state = st_folium(
-        m, height=600, returned_objects=["last_active_drawing", "all_drawings"],
+        m, height=600,
+        returned_objects=["last_active_drawing", "all_drawings"],
         use_container_width=True
     )
 
     # -------------------
     # Section from drawn line (feet)
     # -------------------
-    st.header("📈 Section / Profile (ft)")
+    st.header("📈 Section / Profile (ft) — Filled Bands")
     corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
 
+    # get last drawn polyline
     polyline_coords = None
     drawings = map_state.get("all_drawings") or []
     if drawings:
@@ -198,16 +221,18 @@ if uploaded_file:
                     polyline_coords = geom.get("coordinates")  # [[lon, lat], ...]
                     break
 
+    sec = None
+    total_len_ft = 0.0
+
     if polyline_coords is None:
         st.info("Draw a polyline on the map to define the section line.")
     else:
-        # Project to meters (then convert to ft for outputs)
+        # project to meters then convert to feet for outputs
         transformer = get_transformer(center_lat, center_lon)
         XY_m = np.array([transformer.transform(lon, lat)
                         for lat, lon in zip(data["Latitude"], data["Longitude"])])
         poly_xy_m = np.array([transformer.transform(lon, lat)
                               for lon, lat in np.array(polyline_coords)])
-
         chain_ft, dist_ft, total_len_ft = project_chainage_to_polyline(XY_m, poly_xy_m)
 
         keep = dist_ft <= corridor_ft
@@ -218,17 +243,54 @@ if uploaded_file:
         if sec.empty:
             st.warning("No borings fall within the selected corridor width. Widen the corridor or redraw the line.")
         else:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=sec["Chainage_ft"], y=sec["Top_EL"],
-                                     mode="lines+markers", name="Top EL (ft)"))
-            if sec["PWR_EL"].notna().any():
-                fig.add_trace(go.Scatter(x=sec["Chainage_ft"], y=sec["PWR_EL"],
-                                         mode="lines+markers", name="PWR EL (ft)"))
-            fig.add_trace(go.Scatter(x=sec["Chainage_ft"], y=sec["Bottom_EL"],
-                                     mode="lines+markers", name="Bottom EL (ft)"))
+            # ---- Filled-band profile like your example ----
+            x = sec["Chainage_ft"].to_numpy()
+            top = sec["Top_EL"].to_numpy()
+            bot = sec["Bottom_EL"].to_numpy()
+            pwr = sec["PWR_EL"].to_numpy()  # may include NaNs
 
-            for x, y, n in zip(sec["Chainage_ft"], sec["Top_EL"], sec["Name"]):
-                fig.add_annotation(x=x, y=y, text=str(n), showarrow=True, arrowhead=1, yshift=6)
+            fig = go.Figure()
+
+            # Overburden (green): Top -> (PWR if present else Bottom)
+            lower_overburden = np.where(np.isnan(pwr), bot, pwr)
+            add_band(fig, x, top, lower_overburden, "rgba(34,197,94,0.55)", "Overburden")
+
+            # Rock (maroon): only where PWR exists -> Bottom
+            mask = ~np.isnan(pwr)
+            if mask.any():
+                idx = np.where(mask)[0]
+                splits = np.where(np.diff(idx) > 1)[0]
+                segments = np.split(idx, splits + 1)
+                for seg in segments:
+                    xs = x[seg]
+                    y_up = pwr[seg]
+                    y_lo = bot[seg]
+                    add_band(fig, xs, y_up, y_lo, "rgba(127,29,29,0.70)", "Rock")
+
+            # Black vertical posts at borings
+            for xi, ytop, ybot in zip(x, top, bot):
+                fig.add_trace(go.Scatter(x=[xi, xi], y=[ybot, ytop],
+                                         mode="lines", line=dict(color="black", width=2),
+                                         showlegend=False, hoverinfo="skip"))
+
+            # Outline lines (thin black)
+            fig.add_trace(go.Scatter(x=x, y=top, mode="lines+markers",
+                                     line=dict(color="black", width=1),
+                                     marker=dict(size=5, color="black"),
+                                     name="Top EL (ft)"))
+            if np.any(~np.isnan(pwr)):
+                fig.add_trace(go.Scatter(x=x, y=pwr, mode="lines+markers",
+                                         line=dict(color="black", width=1, dash="dot"),
+                                         marker=dict(size=4, color="black"),
+                                         name="PWR EL (ft)"))
+            fig.add_trace(go.Scatter(x=x, y=bot, mode="lines",
+                                     line=dict(color="black", width=1),
+                                     name="Bottom EL (ft)"))
+
+            # Name annotations above top surface
+            for xi, yi, label in zip(x, top, sec["Name"]):
+                fig.add_annotation(x=xi, y=yi, text=str(label),
+                                   showarrow=True, arrowhead=1, arrowsize=1, ax=0, ay=-25)
 
             fig.update_layout(
                 title=f"Section along drawn line (Length ≈ {total_len_ft:.0f} ft, corridor ±{corridor_ft} ft)",
@@ -241,25 +303,34 @@ if uploaded_file:
             st.plotly_chart(fig, use_container_width=True)
 
     # -------------------
-    # 3D View (Z in feet)
+    # 3D View (feet)
     # -------------------
     st.header("🌀 3D Borehole View (ft)")
+    limit3d = st.checkbox("Limit 3D to the same section corridor", value=True)
+
+    data3d = data
+    if limit3d and sec is not None and not sec.empty:
+        data3d = sec
+
     lines_x, lines_y, lines_z = [], [], []
     pwr_x, pwr_y, pwr_z = [], [], []
 
-    for _, r in data.iterrows():
-        x, y = r["Longitude"], r["Latitude"]
-        lines_x += [x, x, None]
-        lines_y += [y, y, None]
-        lines_z += [r["Bottom_EL"], r["Top_EL"], None]  # feet
+    for _, r in data3d.iterrows():
+        xlon, ylat = r["Longitude"], r["Latitude"]
+        lines_x += [xlon, xlon, None]
+        lines_y += [ylat, ylat, None]
+        lines_z += [r["Bottom_EL"], r["Top_EL"], None]
         if not pd.isna(r["PWR_EL"]):
-            pwr_x.append(x); pwr_y.append(y); pwr_z.append(r["PWR_EL"])
+            pwr_x.append(xlon); pwr_y.append(ylat); pwr_z.append(r["PWR_EL"])
 
     fig3d = go.Figure()
-    fig3d.add_trace(go.Scatter3d(x=lines_x, y=lines_y, z=lines_z, mode="lines", name="Boring"))
-    fig3d.add_trace(go.Scatter3d(x=data["Longitude"], y=data["Latitude"], z=data["Top_EL"], mode="markers", name="Top EL"))
+    fig3d.add_trace(go.Scatter3d(x=lines_x, y=lines_y, z=lines_z,
+                                 mode="lines", name="Boring"))
+    fig3d.add_trace(go.Scatter3d(x=data3d["Longitude"], y=data3d["Latitude"], z=data3d["Top_EL"],
+                                 mode="markers", name="Top EL"))
     if pwr_x:
-        fig3d.add_trace(go.Scatter3d(x=pwr_x, y=pwr_y, z=pwr_z, mode="markers", name="PWR EL"))
+        fig3d.add_trace(go.Scatter3d(x=pwr_x, y=pwr_y, z=pwr_z,
+                                     mode="markers", name="PWR EL"))
 
     fig3d.update_layout(height=600, scene=dict(zaxis_title="Elevation (ft)"))
     st.plotly_chart(fig3d, use_container_width=True)
