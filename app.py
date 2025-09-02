@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
 import folium
-from folium.plugins import MarkerCluster
 import plotly.graph_objects as go
 from pyproj import CRS, Transformer
 import streamlit as st
@@ -75,7 +74,7 @@ if uploaded_file:
         pwr_d = pd.to_numeric(df[c_pwr_d], errors="coerce")
         data['PWR_EL'] = data['PWR_EL'].fillna(data['Top_EL'] - pwr_d)
 
-    # 🚨 FIX: drop missing lat/lon rows
+    # 🚨 Drop rows without coordinates
     data = data.dropna(subset=["Latitude", "Longitude"]).reset_index(drop=True)
 
     if data.empty:
@@ -90,15 +89,36 @@ if uploaded_file:
     center_lat, center_lon = data["Latitude"].mean(), data["Longitude"].mean()
     m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True)
 
-    # 🔄 Add different tile layers
+    # ✅ Add tile layers with attribution
     folium.TileLayer("OpenStreetMap", name="Street Map").add_to(m)
-    folium.TileLayer("Stamen Terrain", name="Terrain").add_to(m)
-    folium.TileLayer("Stamen Toner", name="Black & White").add_to(m)
-    folium.TileLayer("CartoDB positron", name="Light").add_to(m)
-    folium.TileLayer("CartoDB dark_matter", name="Dark").add_to(m)
+
+    folium.TileLayer(
+        tiles="https://stamen-tiles.a.ssl.fastly.net/terrain/{z}/{x}/{y}.jpg",
+        name="Terrain",
+        attr="Map tiles by Stamen Design, under CC BY 3.0. Data by OpenStreetMap, under ODbL."
+    ).add_to(m)
+
+    folium.TileLayer(
+        tiles="https://stamen-tiles.a.ssl.fastly.net/toner/{z}/{x}/{y}.png",
+        name="Black & White",
+        attr="Map tiles by Stamen Design, under CC BY 3.0. Data by OpenStreetMap, under ODbL."
+    ).add_to(m)
+
+    folium.TileLayer(
+        tiles="https://cartodb-basemaps-a.global.ssl.fastly.net/light_all/{z}/{x}/{y}{r}.png",
+        name="Light",
+        attr="©OpenStreetMap, ©CartoDB"
+    ).add_to(m)
+
+    folium.TileLayer(
+        tiles="https://cartodb-basemaps-a.global.ssl.fastly.net/dark_all/{z}/{x}/{y}{r}.png",
+        name="Dark",
+        attr="©OpenStreetMap, ©CartoDB"
+    ).add_to(m)
+
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri",
+        attr="Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, USDA, USGS, AeroGRID, IGN, GIS User Community",
         name="Satellite",
         overlay=False,
         control=True
@@ -108,7 +128,6 @@ if uploaded_file:
     for _, r in data.iterrows():
         popup = f"<b>{r['Name']}</b><br>Top EL: {r['Top_EL']:.2f}<br>PWR EL: {r['PWR_EL'] if pd.notna(r['PWR_EL']) else 'N/A'}<br>Bottom EL: {r['Bottom_EL']:.2f}"
         
-        # Circle marker with tooltip
         folium.CircleMarker(
             location=[r["Latitude"], r["Longitude"]],
             radius=6,
@@ -119,7 +138,6 @@ if uploaded_file:
             tooltip=r["Name"]
         ).add_to(m)
 
-        # Always visible text label
         folium.map.Marker(
             [r["Latitude"], r["Longitude"]],
             icon=folium.DivIcon(
@@ -127,10 +145,8 @@ if uploaded_file:
             )
         ).add_to(m)
 
-    # Add layer control
     folium.LayerControl().add_to(m)
 
-    # Show map
     st.components.v1.html(m._repr_html_(), height=600)
 
     # -------------------
