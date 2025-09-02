@@ -208,7 +208,7 @@ if uploaded_file:
     # -------------------
     # Section from drawn line (feet)
     # -------------------
-    st.header("📈 Section / Profile (ft) — Soil & Rock")
+    st.header("📈 Section / Profile (ft) — Soil & PWR")
     corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
 
     # get last drawn polyline
@@ -268,7 +268,7 @@ if uploaded_file:
                     y_up = pwr[seg]
                     y_lo = bot[seg]
                     add_band(fig, xs, y_up, y_lo, "rgba(127,29,29,0.70)",
-                             "Rock", showlegend=first_rock, legendgroup="rock")
+                             "PWR", showlegend=first_rock, legendgroup="rock")
                     first_rock = False
 
             # Vertical posts at each boring
