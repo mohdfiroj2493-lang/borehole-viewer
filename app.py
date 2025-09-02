@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from pyproj import CRS, Transformer
 import streamlit as st
 from streamlit_folium import st_folium
+from scipy.interpolate import griddata  # NEW
 
 FT_PER_M = 3.280839895  # meters -> feet
 
@@ -346,34 +347,93 @@ if uploaded_file:
             st.plotly_chart(fig, use_container_width=True)
 
     # -------------------
-    # 3D View (feet)
+    # 3D View with Topography (feet)
     # -------------------
-    st.header("🌀 3D Borehole View (ft)")
+    st.header("🗺️ 3D Borehole + Terrain (ft)")
     limit3d = st.checkbox("Limit 3D to the same section corridor", value=True)
+    grid_n = st.slider("Terrain grid size (N×N)", 40, 160, 90, step=10)
+    surf_opacity = st.slider("Terrain surface opacity", 0.2, 1.0, 0.75, step=0.05)
 
     data3d = data
-    if limit3d and sec is not None and not sec.empty:
+    if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
         data3d = sec
 
-    lines_x, lines_y, lines_z = [], [], []
-    pwr_x, pwr_y, pwr_z = [], [], []
+    # Project lon/lat to local XY in **feet**
+    transformer = get_transformer(center_lat, center_lon)
+    XY_m_all = np.array([transformer.transform(lon, lat)
+                         for lat, lon in zip(data3d["Latitude"], data3d["Longitude"])])
+    X_ft = XY_m_all[:, 0] * FT_PER_M
+    Y_ft = XY_m_all[:, 1] * FT_PER_M
+    Z_top = data3d["Top_EL"].to_numpy()
+    Z_pwr = data3d["PWR_EL"].to_numpy()
+    Z_bot = data3d["Bottom_EL"].to_numpy()
 
-    for _, r in data3d.iterrows():
-        xlon, ylat = r["Longitude"], r["Latitude"]
-        lines_x += [xlon, xlon, None]
-        lines_y += [ylat, ylat, None]
-        lines_z += [r["Bottom_EL"], r["Top_EL"], None]
-        if not pd.isna(r["PWR_EL"]):
-            pwr_x.append(xlon); pwr_y.append(ylat); pwr_z.append(r["PWR_EL"])
+    # Build interpolation grid
+    gx = np.linspace(X_ft.min(), X_ft.max(), grid_n)
+    gy = np.linspace(Y_ft.min(), Y_ft.max(), grid_n)
+    GX, GY = np.meshgrid(gx, gy)
 
+    # Interpolate topography (linear, fall back to nearest for gaps)
+    points = np.column_stack([X_ft, Y_ft])
+    Z_lin = griddata(points, Z_top, (GX, GY), method="linear")
+    Z_nn  = griddata(points, Z_top, (GX, GY), method="nearest")
+    Z_surf = np.where(np.isnan(Z_lin), Z_nn, Z_lin)
+
+    # Build 3D figure
     fig3d = go.Figure()
-    fig3d.add_trace(go.Scatter3d(x=lines_x, y=lines_y, z=lines_z,
-                                 mode="lines", name="Boring"))
-    fig3d.add_trace(go.Scatter3d(x=data3d["Longitude"], y=data3d["Latitude"], z=data3d["Top_EL"],
-                                 mode="markers", name="Top EL"))
-    if pwr_x:
-        fig3d.add_trace(go.Scatter3d(x=pwr_x, y=pwr_y, z=pwr_z,
-                                     mode="markers", name="PWR EL"))
 
-    fig3d.update_layout(height=600, scene=dict(zaxis_title="Elevation (ft)"))
+    # Terrain surface
+    fig3d.add_trace(go.Surface(
+        x=GX, y=GY, z=Z_surf,
+        colorscale="YlGnBu",
+        showscale=True,
+        colorbar=dict(title="Elevation (ft)"),
+        opacity=surf_opacity,
+        contours={"z": {"show": True, "usecolormap": False, "highlightcolor": "gray", "project_z": True}},
+        name="Terrain"
+    ))
+
+    # Borehole sticks
+    lines_x, lines_y, lines_z = [], [], []
+    for xi, yi, zt, zb in zip(X_ft, Y_ft, Z_top, Z_bot):
+        lines_x += [xi, xi, None]
+        lines_y += [yi, yi, None]
+        lines_z += [zb, zt, None]
+    fig3d.add_trace(go.Scatter3d(
+        x=lines_x, y=lines_y, z=lines_z,
+        mode="lines", line=dict(color="black", width=3),
+        name="Boring"
+    ))
+
+    # Top EL markers (sky blue)
+    fig3d.add_trace(go.Scatter3d(
+        x=X_ft, y=Y_ft, z=Z_top,
+        mode="markers",
+        marker=dict(size=4, color="rgb(135,206,250)"),
+        name="Top EL (ft)"
+    ))
+
+    # PWR markers (red) where present
+    mask_pwr = ~np.isnan(Z_pwr)
+    if mask_pwr.any():
+        fig3d.add_trace(go.Scatter3d(
+            x=X_ft[mask_pwr], y=Y_ft[mask_pwr], z=Z_pwr[mask_pwr],
+            mode="markers",
+            marker=dict(size=3, color="red"),
+            name="PWR EL (ft)"
+        ))
+
+    fig3d.update_layout(
+        height=650,
+        scene=dict(
+            xaxis_title="Easting (ft)",
+            yaxis_title="Northing (ft)",
+            zaxis_title="Elevation (ft)",
+            aspectmode="data"
+        ),
+        legend=dict(orientation="h")
+    )
+
+    # Nice camera angle
+    fig3d.update_layout(scene_camera=dict(eye=dict(x=1.6, y=1.6, z=1.0)))
     st.plotly_chart(fig3d, use_container_width=True)
