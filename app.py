@@ -343,18 +343,24 @@ if uploaded_file:
 
             st.plotly_chart(fig, use_container_width=True)
 
+
 # -------------------
-# 3D Borehole View (points only)
+# 3D Borehole View (points only, plan coordinates in feet)
 # -------------------
-st.header("🌀 3D Borehole View (ft)")
+st.header("🌀 3D Borehole View (ft, Plan Coordinates)")
 limit3d = st.checkbox("Limit 3D to the same section corridor", value=True)
 
 data3d = data
-if limit3d and sec is not None and not sec.empty:
+if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
     data3d = sec
 
-lon = data3d["Longitude"].to_numpy()
-lat = data3d["Latitude"].to_numpy()
+# Project lon/lat to local UTM → meters → feet (plan coordinates)
+transformer = get_transformer(center_lat, center_lon)
+XY_m = np.array([transformer.transform(lon, lat)
+                 for lat, lon in zip(data3d["Latitude"], data3d["Longitude"])])
+X_ft = XY_m[:, 0] * FT_PER_M  # Easting (ft)
+Y_ft = XY_m[:, 1] * FT_PER_M  # Northing (ft)
+
 z_top = data3d["Top_EL"].to_numpy()
 z_bot = data3d["Bottom_EL"].to_numpy()
 z_pwr = data3d["PWR_EL"].to_numpy()
@@ -362,47 +368,51 @@ names = data3d["Name"].astype(str).to_numpy()
 
 fig3d = go.Figure()
 
-# Top elevation (sky blue)
+# Top elevation points (sky blue)
 fig3d.add_trace(go.Scatter3d(
-    x=lon, y=lat, z=z_top,
+    x=X_ft, y=Y_ft, z=z_top,
     mode="markers",
     marker=dict(size=5, color="rgb(135,206,250)"),
     name="Top EL (ft)",
     text=names,
-    hovertemplate="<b>%{text}</b><br>Top EL: %{z:.2f} ft<extra></extra>"
+    hovertemplate="<b>%{text}</b><br>Top EL: %{z:.2f} ft"
+                  "<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
 ))
 
-# Bottom elevation (dark gray)
+# Bottom elevation points (dark gray)
 fig3d.add_trace(go.Scatter3d(
-    x=lon, y=lat, z=z_bot,
+    x=X_ft, y=Y_ft, z=z_bot,
     mode="markers",
     marker=dict(size=4, color="rgb(90,90,90)"),
     name="Bottom EL (ft)",
     text=names,
-    hovertemplate="<b>%{text}</b><br>Bottom EL: %{z:.2f} ft<extra></extra>"
+    hovertemplate="<b>%{text}</b><br>Bottom EL: %{z:.2f} ft"
+                  "<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
 ))
 
-# PWR elevation (red) where available
+# PWR elevation points (red) where present
 mask = ~np.isnan(z_pwr)
 if mask.any():
     fig3d.add_trace(go.Scatter3d(
-        x=lon[mask], y=lat[mask], z=z_pwr[mask],
+        x=X_ft[mask], y=Y_ft[mask], z=z_pwr[mask],
         mode="markers",
         marker=dict(size=4, color="red"),
         name="PWR EL (ft)",
         text=names[mask],
-        hovertemplate="<b>%{text}</b><br>PWR EL: %{z:.2f} ft<extra></extra>"
+        hovertemplate="<b>%{text}</b><br>PWR EL: %{z:.2f} ft"
+                      "<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
     ))
 
 fig3d.update_layout(
     height=600,
     scene=dict(
-        xaxis_title="Longitude",
-        yaxis_title="Latitude",
+        xaxis_title="Easting (ft)",
+        yaxis_title="Northing (ft)",
         zaxis_title="Elevation (ft)",
         aspectmode="data"
     ),
-    legend=dict(orientation="h")
+    legend=dict(orientation="h"),
+    margin=dict(l=0, r=0, b=0, t=0)
 )
 
 st.plotly_chart(fig3d, use_container_width=True)
