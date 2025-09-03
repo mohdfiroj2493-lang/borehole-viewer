@@ -343,12 +343,15 @@ if uploaded_file:
 
             st.plotly_chart(fig, use_container_width=True)
 
-
 # -------------------
-# 3D Borehole View (points only, plan coordinates in feet)
+# 3D Borehole View (points only, plan coordinates in feet) with vertical exaggeration
 # -------------------
 st.header("🌀 3D Borehole View (ft, Plan Coordinates)")
-limit3d = st.checkbox("Limit 3D to the same section corridor", value=True)
+c1, c2 = st.columns([1,1])
+with c1:
+    limit3d = st.checkbox("Limit to section corridor", value=True)
+with c2:
+    ve = st.slider("Vertical exaggeration (display only)", 1.0, 15.0, 6.0, step=0.5)
 
 data3d = data
 if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
@@ -390,7 +393,7 @@ fig3d.add_trace(go.Scatter3d(
                   "<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
 ))
 
-# PWR elevation points (red) where present
+# PWR points (red) where present
 mask = ~np.isnan(z_pwr)
 if mask.any():
     fig3d.add_trace(go.Scatter3d(
@@ -403,16 +406,23 @@ if mask.any():
                       "<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
     ))
 
+# Make vertical visually taller without changing the actual values
 fig3d.update_layout(
-    height=600,
+    height=650,
     scene=dict(
         xaxis_title="Easting (ft)",
         yaxis_title="Northing (ft)",
-        zaxis_title="Elevation (ft)",
-        aspectmode="data"
+        zaxis_title=f"Elevation (ft) — {ve}×",
+        aspectmode="manual",
+        aspectratio=dict(x=1, y=1, z=ve),  # vertical exaggeration
     ),
     legend=dict(orientation="h"),
-    margin=dict(l=0, r=0, b=0, t=0)
+    margin=dict(l=0, r=0, b=0, t=10)
 )
 
+# Optional nicer camera angle (comment out if you prefer default)
+fig3d.update_layout(scene_camera=dict(eye=dict(x=1.8, y=1.8, z=1.2)))
+
 st.plotly_chart(fig3d, use_container_width=True)
+
+    
