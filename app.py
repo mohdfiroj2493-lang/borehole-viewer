@@ -343,4 +343,63 @@ if uploaded_file:
 
             st.plotly_chart(fig, use_container_width=True)
 
+# -------------------
+# 3D Borehole View (points only, plan coordinates in feet) with lower vertical exaggeration
+# -------------------
+st.header("🌀 3D Borehole View (ft, Plan Coordinates)")
+c1, c2 = st.columns([1,1])
+with c1:
+    limit3d = st.checkbox("Limit to section corridor", value=True)
+with c2:
+    ve = st.slider("Vertical exaggeration (display only)", 1.0, 6.0, 2.0, step=0.5)
 
+data3d = data
+if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
+    data3d = sec
+
+# Project lon/lat to local UTM → meters → feet (plan coordinates)
+transformer = get_transformer(center_lat, center_lon)
+XY_m = np.array([transformer.transform(lon, lat)
+                 for lat, lon in zip(data3d["Latitude"], data3d["Longitude"])])
+X_ft = XY_m[:, 0] * FT_PER_M
+Y_ft = XY_m[:, 1] * FT_PER_M
+
+z_top = data3d["Top_EL"].to_numpy()
+z_bot = data3d["Bottom_EL"].to_numpy()
+z_pwr = data3d["PWR_EL"].to_numpy()
+names = data3d["Name"].astype(str).to_numpy()
+
+fig3d = go.Figure()
+fig3d.add_trace(go.Scatter3d(x=X_ft, y=Y_ft, z=z_top, mode="markers",
+    marker=dict(size=5, color="rgb(135,206,250)"), name="Top EL (ft)",
+    text=names,
+    hovertemplate="<b>%{text}</b><br>Top EL: %{z:.2f} ft<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
+))
+fig3d.add_trace(go.Scatter3d(x=X_ft, y=Y_ft, z=z_bot, mode="markers",
+    marker=dict(size=4, color="rgb(90,90,90)"), name="Bottom EL (ft)",
+    text=names,
+    hovertemplate="<b>%{text}</b><br>Bottom EL: %{z:.2f} ft<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
+))
+mask = ~np.isnan(z_pwr)
+if mask.any():
+    fig3d.add_trace(go.Scatter3d(x=X_ft[mask], y=Y_ft[mask], z=z_pwr[mask], mode="markers",
+        marker=dict(size=4, color="red"), name="PWR EL (ft)",
+        text=names[mask],
+        hovertemplate="<b>%{text}</b><br>PWR EL: %{z:.2f} ft<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
+    ))
+
+fig3d.update_layout(
+    height=650,
+    scene=dict(
+        xaxis_title="Easting (ft)",
+        yaxis_title="Northing (ft)",
+        zaxis_title=f"Elevation (ft) — {ve}×",
+        aspectmode="manual",
+        aspectratio=dict(x=1, y=1, z=ve),   # lower exaggeration
+    ),
+    legend=dict(orientation="h"),
+    margin=dict(l=0, r=0, b=0, t=10),
+    scene_camera=dict(eye=dict(x=1.6, y=1.6, z=1.0))
+)
+
+st.plotly_chart(fig3d, use_container_width=True)
