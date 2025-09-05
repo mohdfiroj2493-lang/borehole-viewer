@@ -1,39 +1,151 @@
-import pandas as pd
+# app.py
+import io
+import json
 import numpy as np
+import pandas as pd
+import streamlit as st
 import folium
 from folium.plugins import Draw
+from streamlit_folium import st_folium
 import plotly.graph_objects as go
 from pyproj import CRS, Transformer
-import streamlit as st
-from streamlit_folium import st_folium
 
 FT_PER_M = 3.280839895  # meters -> feet
 
+# -------------------------------
+# Soil color map + legend order
+# -------------------------------
+SOIL_COLOR_MAP = {
+    "Topsoil": "#ffffcb",
+    "SM": "#76d7c4",
+    "SC-SM": "#fff59d",
+    "CL": "#c5cae9",
+    "PWR": "#808080",
+    "RF": "#929591",
+    "ML": "#ef5350",
+    "CL-ML": "#ef9a9a",
+    "CH": "#64b5f6",
+    "MH": "#ffb74d",
+    "GM": "#aed581",
+    "SC": "#81c784",
+    "Rock": "#f8bbd0",
+    "SM-SC": "#e1bee7",
+    "SP": "#ce93d8",
+    "SW": "#ba68c8",
+    "GW": "#c8e6c9",
+    "SM-ML": "#dcedc8",
+    "CL-CH": "#fff176",
+    "SC-CL": "#ffee58",
+}
+ORDERED_SOIL_TYPES = [
+    "Topsoil", "SM", "SC-SM", "CL", "PWR", "RF", "ML", "CL-ML", "CH", "MH", "GM",
+    "SC", "Rock", "SM-SC", "SP", "SW", "GW", "SM-ML", "CL-CH", "SC-CL"
+]
 
 # -------------------------------
-# Helpers
+# Column normalization (MAIN)
 # -------------------------------
-def pick(colnames, *aliases):
-    for a in aliases:
-        a = a.lower()
-        if a in colnames:
-            return a
-    return None
+RENAME_MAP = {
+    'Bore Log': 'Borehole',
+    'Borehole': 'Borehole',
+    'Elevation From': 'Elevation_From',
+    'Elevation To': 'Elevation_To',
+    'Soil Layer Description': 'Soil_Type',
+    'Latitude': 'Latitude',
+    'Longitude': 'Longitude',
+    'SPT N-Value': 'SPT',
+}
 
+def normalize_main_excel(file) -> pd.DataFrame:
+    df = pd.read_excel(file)
+    df.columns = [c.strip() for c in df.columns]
+    # rename if present
+    for k, v in RENAME_MAP.items():
+        if k in df.columns:
+            df.rename(columns={k: v}, inplace=True)
 
+    need = ['Borehole', 'Elevation_From', 'Elevation_To', 'Soil_Type', 'Latitude', 'Longitude']
+    missing = [c for c in need if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in MAIN Excel: {missing}")
+
+    # extract USCS in parentheses or 'Topsoil'
+    soil = df['Soil_Type'].astype(str)
+    # try "(SM)" etc.
+    extracted = soil.str.extract(r'\(([^)]+)\)')[0]
+    # fallbacks
+    extracted = extracted.fillna(
+        soil.str.replace(r'^.*top\s*soil.*$', 'Topsoil', case=False, regex=True)
+    )
+    df['Soil_Type'] = extracted.fillna(soil).str.strip()
+
+    # numeric coords
+    df['Latitude'] = pd.to_numeric(df['Latitude'], errors='coerce')
+    df['Longitude'] = pd.to_numeric(df['Longitude'], errors='coerce')
+
+    # coerce elevations to numeric
+    df['Elevation_From'] = pd.to_numeric(df['Elevation_From'], errors='coerce')
+    df['Elevation_To'] = pd.to_numeric(df['Elevation_To'], errors='coerce')
+
+    # drop rows missing coords
+    df = df.dropna(subset=['Latitude', 'Longitude']).copy()
+
+    # ensure y0<y1 semantics are consistent (top > bottom)
+    # Elevation_From is the top of the layer; Elevation_To is the bottom.
+    # Nothing to swap unless the sheet is inverted; add safety:
+    swap_mask = df['Elevation_From'] < df['Elevation_To']
+    df.loc[swap_mask, ['Elevation_From', 'Elevation_To']] = df.loc[
+        swap_mask, ['Elevation_To', 'Elevation_From']
+    ].values
+
+    # keep a clean borehole order by name
+    df['Borehole'] = df['Borehole'].astype(str)
+
+    return df
+
+# -------------------------------
+# Proposed-only loader (lat/lon/name)
+# -------------------------------
+def normalize_cols_general(df):
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    lower = {c.lower(): c for c in df.columns}
+    ren = {}
+    if "latitude" in lower: ren[lower["latitude"]] = "Latitude"
+    elif "lat" in lower:    ren[lower["lat"]] = "Latitude"
+    if "longitude" in lower: ren[lower["longitude"]] = "Longitude"
+    elif "lon" in lower:     ren[lower["lon"]] = "Longitude"
+    elif "long" in lower:    ren[lower["long"]] = "Longitude"
+    if "name" in lower:      ren[lower["name"]] = "Name"
+    elif "id" in lower:      ren[lower["id"]] = "Name"
+    df = df.rename(columns=ren)
+    if "Name" not in df.columns:
+        df["Name"] = [f"Proposed-{i+1}" for i in range(len(df))]
+    df["Latitude"]  = pd.to_numeric(df["Latitude"], errors="coerce")
+    df["Longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
+    return df.dropna(subset=["Latitude","Longitude"])[["Latitude","Longitude","Name"]]
+
+def try_read_proposed(file) -> pd.DataFrame:
+    if file is None:
+        return pd.DataFrame(columns=["Latitude","Longitude","Name"])
+    try:
+        pdf = pd.read_excel(file)
+        return normalize_cols_general(pdf)
+    except Exception:
+        return pd.DataFrame(columns=["Latitude","Longitude","Name"])
+
+# -------------------------------
+# Geometry helpers (no shapely)
+# -------------------------------
 def get_transformer(lat, lon):
-    """Pick a local UTM projection for accurate XY distances (meters)."""
     zone = int((lon + 180) // 6) + 1
     crs_target = CRS.from_string(f"+proj=utm +zone={zone} +datum=WGS84 +units=m +no_defs")
     return Transformer.from_crs("EPSG:4326", crs_target, always_xy=True)
 
-
 def project_chainage_to_polyline(XY_m, poly_xy_m):
-    """
-    XY_m: Nx2 in meters (points)
-    poly_xy_m: Mx2 in meters (polyline vertices)
-    Returns (in feet): chain_ft, dist_ft, total_len_ft
-    """
+    if len(poly_xy_m) < 2:
+        return (np.zeros(len(XY_m)), np.full(len(XY_m), np.inf), 0.0)
+
     seg_vecs = poly_xy_m[1:] - poly_xy_m[:-1]
     seg_len_m = np.linalg.norm(seg_vecs, axis=1)
     seg_len_m[seg_len_m == 0] = 1e-9
@@ -60,346 +172,210 @@ def project_chainage_to_polyline(XY_m, poly_xy_m):
 
     return chain_m * FT_PER_M, dist_m * FT_PER_M, cum_m[-1] * FT_PER_M
 
-
-def add_band(fig, x_arr, y_upper, y_lower, fill_rgba, name, showlegend=True, legendgroup=None):
-    """Add a filled band polygon between y_upper and y_lower along x_arr."""
-    if len(x_arr) < 2:
-        return
-    x_closed = np.concatenate([x_arr, x_arr[::-1]])
-    y_closed = np.concatenate([y_upper, y_lower[::-1]])
-    fig.add_trace(
-        go.Scatter(
-            x=x_closed, y=y_closed,
-            mode="lines",
-            line=dict(color="black", width=1),
-            fill="toself",
-            fillcolor=fill_rgba,
-            name=name,
-            showlegend=showlegend,
-            legendgroup=legendgroup,
-            hoverinfo="skip"  # bands don't clutter hover
-        )
-    )
-
-
 # -------------------------------
-# Streamlit UI
+# UI
 # -------------------------------
-st.set_page_config(page_title="Borehole Viewer", layout="wide")
+st.set_page_config(page_title="Soil Profile (Disconnected Columns)", layout="wide")
 st.title("📍 Borehole Visualization Tool")
-st.caption("Upload your Excel, draw a section on the map, then generate a filled profile and 3D view. All units shown in **feet**.")
+st.caption("Upload MAIN layered Excel, optionally PROPOSED points. Draw a section on the map, then generate a soil profile. All units in feet.")
 
-uploaded_file = st.file_uploader("Upload Excel file", type=["xls", "xlsx"])
+left, right = st.columns([1,1])
+with left:
+    main_file = st.file_uploader("Upload MAIN Excel (required)", type=["xls","xlsx"], key="main")
+with right:
+    prop_file = st.file_uploader("Upload PROPOSED Excel (optional: Latitude/Longitude/Name)", type=["xls","xlsx"], key="prop")
 
-if uploaded_file:
-    df = pd.read_excel(uploaded_file)
-    df.columns = [c.strip().lower() for c in df.columns]
+if not main_file:
+    st.stop()
 
-    # Columns (case-insensitive aliases)
-    c_name   = pick(df.columns, 'name', 'id', 'boring id', 'hole id')
-    c_lat    = pick(df.columns, 'latitude', 'lat')
-    c_lon    = pick(df.columns, 'longitude', 'lon', 'long')
-    c_top    = pick(df.columns, 'boring elevation', 'ground elevation', 'top el', 'top elevation')
-    c_depth  = pick(df.columns, 'depth', 'total depth', 'hole depth')
-    c_pwr_d  = pick(df.columns, 'pwr depth', 'weathered rock depth')
-    c_pwr_el = pick(df.columns, 'pwr el', 'pwr elevation', 'weathered rock elevation')
+# Load
+try:
+    df_main = normalize_main_excel(main_file)
+except Exception as e:
+    st.error(f"Failed to read MAIN Excel: {e}")
+    st.stop()
 
-    # Build dataframe (all elevations/depths assumed feet from Excel)
-    data = pd.DataFrame({
-        'Name': df[c_name],
-        'Latitude': df[c_lat],
-        'Longitude': df[c_lon],
-        'Top_EL': pd.to_numeric(df[c_top], errors="coerce"),
-        'Depth':  pd.to_numeric(df[c_depth], errors="coerce"),
-    })
-    data['Bottom_EL'] = data['Top_EL'] - data['Depth']
-    data['PWR_EL'] = np.nan
-    if c_pwr_el:
-        data['PWR_EL'] = pd.to_numeric(df[c_pwr_el], errors="coerce")
-    if c_pwr_d:
-        pwr_d = pd.to_numeric(df[c_pwr_d], errors="coerce")
-        data['PWR_EL'] = data['PWR_EL'].fillna(data['Top_EL'] - pwr_d)
+df_prop = try_read_proposed(prop_file)
 
-    # Clean
-    data = data.dropna(subset=["Latitude", "Longitude"]).reset_index(drop=True)
-    if data.empty:
-        st.error("No valid rows with Latitude/Longitude found.")
-        st.stop()
+# One coordinate per borehole for map/chainage
+bh_coords = df_main.groupby('Borehole')[['Latitude','Longitude']].first().reset_index()
 
-    # -------------------
-    # Map + Drawing
-    # -------------------
-    st.header("🌍 Map — Draw your section line")
-    with st.expander("Tip", expanded=True):
-        st.write("Use the **polyline tool** on the map to draw your section. Double-click to finish. Popups/labels are in **ft**.")
+# Map center/bounds
+center_lat, center_lon = float(bh_coords['Latitude'].mean()), float(bh_coords['Longitude'].mean())
 
-    center_lat, center_lon = data["Latitude"].mean(), data["Longitude"].mean()
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True)
+# ------------------- Map & draw -------------------
+st.header("🗺️ Map — Draw your section line")
+with st.expander("Tip", expanded=True):
+    st.write("Use the **polyline tool** on the map to draw your section. **Click the small Finish button** on the toolbar to end the line.")
 
-    # Basemaps (with attributions)
-    folium.TileLayer("OpenStreetMap", name="Street Map").add_to(m)
-    folium.TileLayer(
-        tiles="https://stamen-tiles.a.ssl.fastly.net/terrain/{z}/{x}/{y}.jpg",
-        name="Terrain",
-        attr="Map tiles by Stamen Design, under CC BY 3.0. Data by OpenStreetMap, under ODbL."
+m = folium.Map(location=[center_lat, center_lon], zoom_start=13, control_scale=True)
+# Base layers
+folium.TileLayer("OpenStreetMap", name="Street").add_to(m)
+folium.TileLayer(
+    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    attr="Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, USDA, USGS, AeroGRID, IGN, GIS User Community",
+    name="Satellite", overlay=False, control=True
+).add_to(m)
+
+# Existing boreholes (blue)
+for _, r in bh_coords.iterrows():
+    folium.CircleMarker(
+        location=[float(r['Latitude']), float(r['Longitude'])],
+        radius=6, color="blue", fill=True, fill_opacity=0.9,
+        tooltip=str(r['Borehole'])
     ).add_to(m)
-    folium.TileLayer(
-        tiles="https://stamen-tiles.a.ssl.fastly.net/toner/{z}/{x}/{y}.png",
-        name="Black & White",
-        attr="Map tiles by Stamen Design, under CC BY 3.0. Data by OpenStreetMap, under ODbL."
-    ).add_to(m)
-    folium.TileLayer(
-        tiles="https://cartodb-basemaps-a.global.ssl.fastly.net/light_all/{z}/{x}/{y}{r}.png",
-        name="Light",
-        attr="©OpenStreetMap, ©CartoDB"
-    ).add_to(m)
-    folium.TileLayer(
-        tiles="https://cartodb-basemaps-a.global.ssl.fastly.net/dark_all/{z}/{x}/{y}{r}.png",
-        name="Dark",
-        attr="©OpenStreetMap, ©CartoDB"
-    ).add_to(m)
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, USDA, USGS, AeroGRID, IGN, GIS User Community",
-        name="Satellite",
-        overlay=False,
-        control=True
+    folium.Marker(
+        [float(r['Latitude']), float(r['Longitude'])],
+        icon=folium.DivIcon(html=f"<div style='font-size:10pt; color:black; transform: translateY(12px);'>{r['Borehole']}</div>")
     ).add_to(m)
 
-    # Borehole markers + labels
-    for _, r in data.iterrows():
-        popup = (
-            f"<b>{r['Name']}</b><br>"
-            f"Top EL: {r['Top_EL']:.2f} ft<br>"
-            f"PWR EL: {('%.2f ft' % r['PWR_EL']) if pd.notna(r['PWR_EL']) else 'N/A'}<br>"
-            f"Bottom EL: {r['Bottom_EL']:.2f} ft"
-        )
+# Proposed (red)
+if not df_prop.empty:
+    for _, r in df_prop.iterrows():
         folium.CircleMarker(
-            location=[r["Latitude"], r["Longitude"]],
-            radius=6, color="blue", fill=True, fill_opacity=0.7,
-            popup=popup, tooltip=r["Name"]
-        ).add_to(m)
-        folium.Marker(
-            [r["Latitude"], r["Longitude"]],
-            icon=folium.DivIcon(
-                html=f"""
-                <div style="
-                    font-size: 10pt; color: black; white-space: nowrap;
-                    text-align: center; transform: translateY(12px);
-                ">{r['Name']}</div>
-                """
-            )
+            location=[float(r['Latitude']), float(r['Longitude'])],
+            radius=6, color="red", fill=True, fill_opacity=0.9,
+            tooltip=str(r.get('Name','Proposed'))
         ).add_to(m)
 
-    Draw(
-        export=False,
-        draw_options={"polyline": True, "polygon": False, "rectangle": False,
-                      "circle": False, "circlemarker": False, "marker": False},
-        edit_options={"edit": True, "remove": True},
-    ).add_to(m)
-    folium.LayerControl().add_to(m)
+Draw(
+    export=False,
+    draw_options={"polyline": True, "polygon": False, "rectangle": False,
+                  "circle": False, "circlemarker": False, "marker": False},
+    edit_options={"edit": True, "remove": True},
+).add_to(m)
+folium.LayerControl().add_to(m)
 
-    map_state = st_folium(
-        m, height=600,
-        returned_objects=["last_active_drawing", "all_drawings"],
-        use_container_width=True
-    )
-
-    # -------------------
-    # Section from drawn line (feet)
-    # -------------------
-    st.header("📈 Section / Profile (ft) — Soil & PWR")
-    corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
-
-    # get last drawn polyline
-    polyline_coords = None
-    drawings = map_state.get("all_drawings") or []
-    if drawings:
-        for g in reversed(drawings):
-            if g and g.get("type") == "Feature":
-                geom = g.get("geometry", {})
-                if geom.get("type") == "LineString":
-                    polyline_coords = geom.get("coordinates")  # [[lon, lat], ...]
-                    break
-
-    sec = None
-    total_len_ft = 0.0
-
-    if polyline_coords is None:
-        st.info("Draw a polyline on the map to define the section line.")
-    else:
-        # project to meters then convert to feet for outputs
-        transformer = get_transformer(center_lat, center_lon)
-        XY_m = np.array([transformer.transform(lon, lat)
-                        for lat, lon in zip(data["Latitude"], data["Longitude"])])
-        poly_xy_m = np.array([transformer.transform(lon, lat)
-                              for lon, lat in np.array(polyline_coords)])
-        chain_ft, dist_ft, total_len_ft = project_chainage_to_polyline(XY_m, poly_xy_m)
-
-        keep = dist_ft <= corridor_ft
-        sec = data.loc[keep].copy()
-        sec["Chainage_ft"] = chain_ft[keep]
-        sec = sec.sort_values("Chainage_ft")
-
-        if sec.empty:
-            st.warning("No borings fall within the selected corridor width. Widen the corridor or redraw the line.")
-        else:
-            # ---- Filled-band profile (single PWR legend; unified hover) ----
-            x   = sec["Chainage_ft"].to_numpy()
-            top = sec["Top_EL"].to_numpy()
-            bot = sec["Bottom_EL"].to_numpy()
-            pwr = sec["PWR_EL"].to_numpy()  # may include NaNs
-
-            fig = go.Figure()
-
-            # Soil (green): Top -> (PWR if present else Bottom)
-            lower_soil = np.where(np.isnan(pwr), bot, pwr)
-            add_band(fig, x, top, lower_soil, "rgba(34,197,94,0.55)", "Soil", True, "soil")
-
-            # PWR (maroon): PWR -> Bottom  [single legend entry even if many segments]
-            mask = ~np.isnan(pwr)
-            first_pwr_band = True
-            if mask.any():
-                idx = np.where(mask)[0]
-                splits = np.where(np.diff(idx) > 1)[0]
-                segments = np.split(idx, splits + 1)
-                for seg in segments:
-                    xs  = x[seg]
-                    y_up = pwr[seg]
-                    y_lo = bot[seg]
-                    add_band(fig, xs, y_up, y_lo, "rgba(127,29,29,0.70)",
-                             "PWR", showlegend=first_pwr_band, legendgroup="pwrband")
-                    first_pwr_band = False
-
-            # Vertical posts at each boring
-            for xi, ytop, ybot in zip(x, top, bot):
-                fig.add_trace(go.Scatter(
-                    x=[xi, xi], y=[ybot, ytop],
-                    mode="lines",
-                    line=dict(color="black", width=2),
-                    showlegend=False,
-                    hoverinfo="skip"
-                ))
-
-            # Top & Bottom outlines (clean hover text)
-            fig.add_trace(go.Scatter(
-                x=x, y=top, mode="lines+markers",
-                line=dict(color="black", width=1),
-                marker=dict(size=5, color="black"),
-                name="Top EL (ft)",
-                hovertemplate="Top EL (ft): %{y:.2f}<extra></extra>"
-            ))
-            fig.add_trace(go.Scatter(
-                x=x, y=bot, mode="lines",
-                line=dict(color="black", width=1),
-                name="Bottom EL (ft)",
-                hovertemplate="Bottom EL (ft): %{y:.2f}<extra></extra>"
-            ))
-
-            # PWR line (dashed) & markers ONLY where PWR exists
-            if mask.any():
-                first_pwr_line = True
-                idx = np.where(mask)[0]
-                splits = np.where(np.diff(idx) > 1)[0]
-                segments = np.split(idx, splits + 1)
-                for seg in segments:
-                    xs = x[seg]; ys = pwr[seg]
-                    fig.add_trace(go.Scatter(
-                        x=xs, y=ys, mode="lines",
-                        line=dict(color="black", width=1, dash="dot"),
-                        name="PWR EL (ft)",
-                        showlegend=first_pwr_line,
-                        hoverinfo="skip",
-                        legendgroup="pwr"
-                    ))
-                    first_pwr_line = False
-                fig.add_trace(go.Scatter(
-                    x=x[mask], y=pwr[mask], mode="markers",
-                    marker=dict(size=4, color="black"),
-                    name="PWR EL (ft)",
-                    legendgroup="pwr",
-                    showlegend=False,
-                    hovertemplate="PWR EL (ft): %{y:.2f}<extra></extra>"
-                ))
-
-            # Borehole labels
-            for xi, yi, label in zip(x, top, sec["Name"]):
-                fig.add_annotation(
-                    x=xi, y=yi, text=str(label),
-                    showarrow=True, arrowhead=1, arrowsize=1, ax=0, ay=-25
-                )
-
-            # Unified vertical tooltip + spike
-            fig.update_layout(
-                title=f"Section along drawn line (Length ≈ {total_len_ft:.0f} ft, corridor ±{corridor_ft} ft)",
-                xaxis_title="Chainage (ft)",
-                yaxis_title="Elevation (ft)",
-                template="plotly_white",
-                hovermode="x unified",
-                legend=dict(orientation="h"),
-            )
-            fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor",
-                             spikethickness=1, spikedash="dot")
-
-            st.plotly_chart(fig, use_container_width=True)
-
-# -------------------
-# 3D Borehole View (points only, plan coordinates in feet) with lower vertical exaggeration
-# -------------------
-st.header("🌀 3D Borehole View (ft, Plan Coordinates)")
-c1, c2 = st.columns([1,1])
-with c1:
-    limit3d = st.checkbox("Limit to section corridor", value=True)
-with c2:
-    ve = st.slider("Vertical exaggeration (display only)", 1.0, 6.0, 2.0, step=0.5)
-
-data3d = data
-if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
-    data3d = sec
-
-# Project lon/lat to local UTM → meters → feet (plan coordinates)
-transformer = get_transformer(center_lat, center_lon)
-XY_m = np.array([transformer.transform(lon, lat)
-                 for lat, lon in zip(data3d["Latitude"], data3d["Longitude"])])
-X_ft = XY_m[:, 0] * FT_PER_M
-Y_ft = XY_m[:, 1] * FT_PER_M
-
-z_top = data3d["Top_EL"].to_numpy()
-z_bot = data3d["Bottom_EL"].to_numpy()
-z_pwr = data3d["PWR_EL"].to_numpy()
-names = data3d["Name"].astype(str).to_numpy()
-
-fig3d = go.Figure()
-fig3d.add_trace(go.Scatter3d(x=X_ft, y=Y_ft, z=z_top, mode="markers",
-    marker=dict(size=5, color="rgb(135,206,250)"), name="Top EL (ft)",
-    text=names,
-    hovertemplate="<b>%{text}</b><br>Top EL: %{z:.2f} ft<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
-))
-fig3d.add_trace(go.Scatter3d(x=X_ft, y=Y_ft, z=z_bot, mode="markers",
-    marker=dict(size=4, color="rgb(90,90,90)"), name="Bottom EL (ft)",
-    text=names,
-    hovertemplate="<b>%{text}</b><br>Bottom EL: %{z:.2f} ft<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
-))
-mask = ~np.isnan(z_pwr)
-if mask.any():
-    fig3d.add_trace(go.Scatter3d(x=X_ft[mask], y=Y_ft[mask], z=z_pwr[mask], mode="markers",
-        marker=dict(size=4, color="red"), name="PWR EL (ft)",
-        text=names[mask],
-        hovertemplate="<b>%{text}</b><br>PWR EL: %{z:.2f} ft<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
-    ))
-
-fig3d.update_layout(
-    height=650,
-    scene=dict(
-        xaxis_title="Easting (ft)",
-        yaxis_title="Northing (ft)",
-        zaxis_title=f"Elevation (ft) — {ve}×",
-        aspectmode="manual",
-        aspectratio=dict(x=1, y=1, z=ve),   # lower exaggeration
-    ),
-    legend=dict(orientation="h"),
-    margin=dict(l=0, r=0, b=0, t=10),
-    scene_camera=dict(eye=dict(x=1.6, y=1.6, z=1.0))
+map_state = st_folium(
+    m, height=600,
+    returned_objects=["all_drawings"],
+    use_container_width=True
 )
 
-st.plotly_chart(fig3d, use_container_width=True)
+# ------------------- Profile controls -------------------
+st.header("📈 Section / Profile (ft) — Disconnected soil columns")
+colA, colB, colC = st.columns([1,1,1])
+with colA:
+    corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
+with colB:
+    half_w = st.slider("Column half-width (ft)", 5, 100, 30, step=5)
+with colC:
+    title_txt = st.text_input("Title", "Soil Profile")
+
+# Find last drawn polyline
+polyline_coords = None
+drawings = (map_state or {}).get("all_drawings") or []
+for g in reversed(drawings):
+    if g and g.get("type") == "Feature":
+        geom = g.get("geometry", {})
+        if geom.get("type") == "LineString":
+            polyline_coords = geom.get("coordinates")  # [[lon, lat], ...]
+            break
+
+if polyline_coords is None:
+    st.info("Draw a polyline on the map and press **Finish** to create the section line.")
+    st.stop()
+
+# ------------------- Chainage & selection -------------------
+transformer = get_transformer(center_lat, center_lon)
+XY_m = np.array([transformer.transform(lon, lat)
+                 for lat, lon in zip(bh_coords["Latitude"], bh_coords["Longitude"])])
+poly_xy_m = np.array([transformer.transform(lon, lat)
+                      for lon, lat in np.array(polyline_coords)])
+chain_ft, dist_ft, total_len_ft = project_chainage_to_polyline(XY_m, poly_xy_m)
+
+bh_pos = bh_coords.copy()
+bh_pos["Chainage_ft"] = chain_ft
+bh_pos["Offset_ft"] = dist_ft
+bh_pos = bh_pos[bh_pos["Offset_ft"] <= corridor_ft].sort_values("Chainage_ft").reset_index(drop=True)
+
+if bh_pos.empty:
+    st.warning("No boreholes within the corridor. Widen the corridor or redraw.")
+    st.stop()
+
+# ------------------- Build profile (disconnected rectangles) -------------------
+# Subset MAIN to only the selected boreholes, keep layers, sort by elevation
+sel_bhs = set(bh_pos["Borehole"].tolist())
+df_layers = df_main[df_main["Borehole"].isin(sel_bhs)].copy()
+df_layers.sort_values(["Borehole", "Elevation_From"], ascending=[True, False], inplace=True)
+
+# Chainage per borehole
+ch_map = dict(zip(bh_pos["Borehole"], bh_pos["Chainage_ft"]))
+
+# compute y limits suggestion
+ymax = float(df_layers["Elevation_From"].max())
+ymin = float(df_layers["Elevation_To"].min())
+
+# Create figure
+fig = go.Figure()
+
+# Legend entries only for used types
+used_types = set()
+
+# Rectangles per layer (not connected between boreholes)
+shapes = []
+for bh, group in df_layers.groupby("Borehole"):
+    if bh not in ch_map:
+        continue
+    x0 = ch_map[bh] - half_w
+    x1 = ch_map[bh] + half_w
+    # add label at the top of the topmost layer
+    top_el = float(group["Elevation_From"].max())
+    fig.add_annotation(x=ch_map[bh], y=top_el, text=str(bh),
+                       showarrow=True, arrowhead=1, arrowsize=1, ax=0, ay=-25)
+
+    for _, r in group.iterrows():
+        soil = str(r["Soil_Type"]).strip()
+        color = SOIL_COLOR_MAP.get(soil, "#cccccc")
+        used_types.add(soil)
+        y_top = float(r["Elevation_From"])
+        y_bot = float(r["Elevation_To"])
+        shapes.append(dict(
+            type="rect",
+            x0=x0, x1=x1, y0=y_bot, y1=y_top,
+            line=dict(color="black", width=1),
+            fillcolor=color,
+            layer="below"
+        ))
+
+fig.update_layout(shapes=shapes)
+
+# Add optional outlines for better reading
+x_order = bh_pos["Chainage_ft"].to_numpy()
+# top and bottom outlines (thin)
+tops = []
+bots = []
+for bh, group in df_layers.groupby("Borehole"):
+    if bh in ch_map:
+        tops.append((ch_map[bh], float(group["Elevation_From"].max())))
+        bots.append((ch_map[bh], float(group["Elevation_To"].min())))
+if tops:
+    tops = np.array(sorted(tops, key=lambda t: t[0]))
+    bots = np.array(sorted(bots, key=lambda t: t[0]))
+    fig.add_trace(go.Scatter(x=tops[:,0], y=tops[:,1], mode="lines+markers",
+                             line=dict(color="black", width=1), marker=dict(size=5, color="black"),
+                             name="Top EL (ft)", hovertemplate="Top EL (ft): %{y:.2f}<extra></extra>"))
+    fig.add_trace(go.Scatter(x=bots[:,0], y=bots[:,1], mode="lines",
+                             line=dict(color="black", width=1),
+                             name="Bottom EL (ft)", hovertemplate="Bottom EL (ft): %{y:.2f}<extra></extra>"))
+
+# Legend dummies for used soil types (in your fixed order)
+for stype in [s for s in ORDERED_SOIL_TYPES if s in used_types]:
+    fig.add_trace(go.Scatter(
+        x=[None], y=[None], mode="markers", name=stype,
+        marker=dict(size=12, color=SOIL_COLOR_MAP.get(stype, "#cccccc"),
+                    symbol="square", line=dict(color="black", width=1))
+    ))
+
+fig.update_layout(
+    title=f"{title_txt} — Length ≈ {total_len_ft:.0f} ft, corridor ±{corridor_ft} ft",
+    xaxis_title="Chainage (ft)",
+    yaxis_title="Elevation (ft)",
+    template="plotly_white",
+    hovermode="x unified",
+    legend=dict(orientation="h"),
+)
+fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor",
+                 spikethickness=1, spikedash="dot")
+
+st.plotly_chart(fig, use_container_width=True)
