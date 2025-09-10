@@ -80,7 +80,7 @@ def add_band(fig, x_arr, y_upper, y_lower, fill_rgba, name, showlegend=True, leg
             name=name,
             showlegend=showlegend,
             legendgroup=legendgroup,
-            hoverinfo="skip"  # bands don't clutter hover
+            hoverinfo="skip"
         )
     )
 
@@ -92,8 +92,15 @@ st.set_page_config(page_title="Borehole Viewer", layout="wide")
 st.title("📍 Borehole Visualization Tool")
 st.caption("Upload your Excel, draw a section on the map, then generate a filled profile and 3D view. All units shown in **feet**.")
 
-uploaded_file = st.file_uploader("Upload Main Borehole Excel", type=["xls", "xlsx"])
+# Two uploaders visible immediately
+c_left, c_right = st.columns(2)
+with c_left:
+    uploaded_file = st.file_uploader("Upload Main Borehole Excel", type=["xls", "xlsx"], key="main")
+with c_right:
+    proposed_file = st.file_uploader("Upload Proposed Bore Logs Excel (optional)", type=["xls", "xlsx"], key="proposed")
 
+# Parse main data (if provided)
+data = None
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
     df.columns = [c.strip().lower() for c in df.columns]
@@ -112,8 +119,8 @@ if uploaded_file:
         'Name': df[c_name],
         'Latitude': df[c_lat],
         'Longitude': df[c_lon],
-        'Top_EL': pd.to_numeric(df[c_top], errors="coerce"),
-        'Depth':  pd.to_numeric(df[c_depth], errors="coerce"),
+        'Top_EL': pd.to_numeric(df[c_top], errors="coerce") if c_top else np.nan,
+        'Depth':  pd.to_numeric(df[c_depth], errors="coerce") if c_depth else np.nan,
     })
     data['Bottom_EL'] = data['Top_EL'] - data['Depth']
     data['PWR_EL'] = np.nan
@@ -126,95 +133,102 @@ if uploaded_file:
     # Clean
     data = data.dropna(subset=["Latitude", "Longitude"]).reset_index(drop=True)
     if data.empty:
-        st.error("No valid rows with Latitude/Longitude found.")
-        st.stop()
+        st.warning("Main file: No valid rows with Latitude/Longitude found.")
+        data = None
 
-    # -------------------
-    # Optional: Proposed Bore Logs (Name, Latitude, Longitude only)
-    # -------------------
-    st.subheader("Optional: Proposed Bore Logs")
-    proposed_file = st.file_uploader("Upload Proposed Bore Logs Excel (optional)", type=["xls", "xlsx"], key="proposed")
+# Parse proposed (if provided) — Name, Latitude, Longitude only
+proposed = None
+if proposed_file:
+    pdf = pd.read_excel(proposed_file)
+    pdf.columns = [c.strip().lower() for c in pdf.columns]
 
-    proposed = None
-    if proposed_file:
-        pdf = pd.read_excel(proposed_file)
-        pdf.columns = [c.strip().lower() for c in c in pdf.columns]
+    p_name = pick(pdf.columns, 'name', 'id', 'boring id', 'hole id')
+    p_lat  = pick(pdf.columns, 'latitude', 'lat')
+    p_lon  = pick(pdf.columns, 'longitude', 'lon', 'long')
 
-        p_name = pick(pdf.columns, 'name', 'id', 'boring id', 'hole id')
-        p_lat  = pick(pdf.columns, 'latitude', 'lat')
-        p_lon  = pick(pdf.columns, 'longitude', 'lon', 'long')
+    if not (p_name and p_lat and p_lon):
+        st.error("Proposed bore logs must include columns for Name, Latitude, and Longitude.")
+    else:
+        proposed = pd.DataFrame({
+            "Name": pdf[p_name].astype(str),
+            "Latitude": pd.to_numeric(pdf[p_lat], errors="coerce"),
+            "Longitude": pd.to_numeric(pdf[p_lon], errors="coerce"),
+        }).dropna(subset=["Latitude", "Longitude"]).reset_index(drop=True)
 
-        if not (p_name and p_lat and p_lon):
-            st.error("Proposed bore logs must include columns for Name, Latitude, and Longitude.")
-        else:
-            proposed = pd.DataFrame({
-                "Name": pdf[p_name].astype(str),
-                "Latitude": pd.to_numeric(pdf[p_lat], errors="coerce"),
-                "Longitude": pd.to_numeric(pdf[p_lon], errors="coerce"),
-            }).dropna(subset=["Latitude", "Longitude"]).reset_index(drop=True)
+        if proposed.empty:
+            st.warning("Proposed file: No valid rows with Latitude/Longitude found.")
+            proposed = None
 
-            if proposed.empty:
-                st.warning("No valid proposed rows with Latitude/Longitude found.")
+# If nothing uploaded, guide the user
+if (data is None) and (proposed is None):
+    st.info("Upload a main borehole file, a proposed bore log file, or both to see them on the map.")
+    st.stop()
 
-    # -------------------
-    # Map + Drawing
-    # -------------------
-    st.header("🌍 Map — Draw your section line")
-    with st.expander("Tip", expanded=True):
-        st.write("Use the **polyline tool** on the map to draw your section. Double-click to finish. Popups/labels are in **ft**.")
-        st.caption("Blue = existing borings from your main file. Red = proposed borings (optional upload).")
+# -------------------
+# Map + Drawing
+# -------------------
+st.header("🌍 Map — Draw your section line")
+with st.expander("Tip", expanded=True):
+    st.write("Use the **polyline tool** on the map to draw your section. Double-click to finish. Popups/labels are in **ft**.")
+    st.caption("Blue = existing borings from your main file. Red = proposed borings (optional upload).")
 
-    # Center map on all available points (existing + proposed if present)
-    lat_series = data["Latitude"]
-    lon_series = data["Longitude"]
-    if proposed is not None and not proposed.empty:
-        lat_series = pd.concat([lat_series, proposed["Latitude"]], ignore_index=True)
-        lon_series = pd.concat([lon_series, proposed["Longitude"]], ignore_index=True)
+# Center map on whichever datasets are present
+lat_series = pd.Series(dtype=float)
+lon_series = pd.Series(dtype=float)
+if data is not None and not data.empty:
+    lat_series = pd.concat([lat_series, data["Latitude"]], ignore_index=True)
+    lon_series = pd.concat([lon_series, data["Longitude"]], ignore_index=True)
+if proposed is not None and not proposed.empty:
+    lat_series = pd.concat([lat_series, proposed["Latitude"]], ignore_index=True)
+    lon_series = pd.concat([lon_series, proposed["Longitude"]], ignore_index=True)
 
-    center_lat, center_lon = lat_series.mean(), lon_series.mean()
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True)
+center_lat, center_lon = lat_series.mean(), lon_series.mean()
+m = folium.Map(location=[center_lat, center_lon], zoom_start=12, control_scale=True)
 
-    # Basemaps (with attributions)
-    folium.TileLayer("OpenStreetMap", name="Street Map").add_to(m)
-    folium.TileLayer(
-        tiles="https://stamen-tiles.a.ssl.fastly.net/terrain/{z}/{x}/{y}.jpg",
-        name="Terrain",
-        attr="Map tiles by Stamen Design, under CC BY 3.0. Data by OpenStreetMap, under ODbL."
-    ).add_to(m)
-    folium.TileLayer(
-        tiles="https://stamen-tiles.a.ssl.fastly.net/toner/{z}/{x}/{y}.png",
-        name="Black & White",
-        attr="Map tiles by Stamen Design, under CC BY 3.0. Data by OpenStreetMap, under ODbL."
-    ).add_to(m)
-    folium.TileLayer(
-        tiles="https://cartodb-basemaps-a.global.ssl.fastly.net/light_all/{z}/{x}/{y}{r}.png",
-        name="Light",
-        attr="©OpenStreetMap, ©CartoDB"
-    ).add_to(m)
-    folium.TileLayer(
-        tiles="https://cartodb-basemaps-a.global.ssl.fastly.net/dark_all/{z}/{x}/{y}{r}.png",
-        name="Dark",
-        attr="©OpenStreetMap, ©CartoDB"
-    ).add_to(m)
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, USDA, USGS, AeroGRID, IGN, GIS User Community",
-        name="Satellite",
-        overlay=False,
-        control=True
-    ).add_to(m)
+# Basemaps (with attributions)
+folium.TileLayer("OpenStreetMap", name="Street Map").add_to(m)
+folium.TileLayer(
+    tiles="https://stamen-tiles.a.ssl.fastly.net/terrain/{z}/{x}/{y}.jpg",
+    name="Terrain",
+    attr="Map tiles by Stamen Design, under CC BY 3.0. Data by OpenStreetMap, under ODbL."
+).add_to(m)
+folium.TileLayer(
+    tiles="https://stamen-tiles.a.ssl.fastly.net/toner/{z}/{x}/{y}.png",
+    name="Black & White",
+    attr="Map tiles by Stamen Design, under CC BY 3.0. Data by OpenStreetMap, under ODbL."
+).add_to(m)
+folium.TileLayer(
+    tiles="https://cartodb-basemaps-a.global.ssl.fastly.net/light_all/{z}/{x}/{y}{r}.png",
+    name="Light",
+    attr="©OpenStreetMap, ©CartoDB"
+).add_to(m)
+folium.TileLayer(
+    tiles="https://cartodb-basemaps-a.global.ssl.fastly.net/dark_all/{z}/{x}/{y}{r}.png",
+    name="Dark",
+    attr="©OpenStreetMap, ©CartoDB"
+).add_to(m)
+folium.TileLayer(
+    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    attr="Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, USDA, USGS, AeroGRID, IGN, GIS User Community",
+    name="Satellite",
+    overlay=False,
+    control=True
+).add_to(m)
 
-    # Feature groups for layer control
-    fg_existing = folium.FeatureGroup(name="Existing Boreholes", show=True).add_to(m)
-    fg_proposed = folium.FeatureGroup(name="Proposed Boreholes", show=True)
+# Feature groups for layer control
+fg_existing = folium.FeatureGroup(name="Existing Boreholes", show=True)
+fg_proposed = folium.FeatureGroup(name="Proposed Boreholes", show=True)
 
-    # Existing boreholes (blue)
+# Existing boreholes (blue)
+if data is not None and not data.empty:
     for _, r in data.iterrows():
         popup = (
             f"<b>{r['Name']}</b><br>"
-            f"Top EL: {r['Top_EL']:.2f} ft<br>"
-            f"PWR EL: {('%.2f ft' % r['PWR_EL']) if pd.notna(r['PWR_EL']) else 'N/A'}<br>"
-            f"Bottom EL: {r['Bottom_EL']:.2f} ft"
+            f"Top EL: {r['Top_EL']:.2f} ft" if pd.notna(r['Top_EL']) else "<b>%s</b><br>Top EL: N/A" % r['Name']
+        )
+        popup += (
+            f"<br>PWR EL: {('%.2f ft' % r['PWR_EL']) if pd.notna(r['PWR_EL']) else 'N/A'}"
+            f"<br>Bottom EL: {('%.2f ft' % r['Bottom_EL']) if pd.notna(r['Bottom_EL']) else 'N/A'}"
         )
         folium.CircleMarker(
             location=[r["Latitude"], r["Longitude"]],
@@ -232,241 +246,248 @@ if uploaded_file:
                 """
             )
         ).add_to(fg_existing)
+    fg_existing.add_to(m)
 
-    # Proposed boreholes (red) — only if uploaded
-    if proposed is not None and not proposed.empty:
-        for _, r in proposed.iterrows():
-            popup = (
-                f"<b>{r['Name']}</b><br>"
-                f"Lat: {r['Latitude']:.6f}, Lon: {r['Longitude']:.6f}"
+# Proposed boreholes (red)
+if proposed is not None and not proposed.empty:
+    for _, r in proposed.iterrows():
+        popup = (
+            f"<b>{r['Name']}</b><br>"
+            f"Lat: {r['Latitude']:.6f}, Lon: {r['Longitude']:.6f}"
+        )
+        folium.CircleMarker(
+            location=[r["Latitude"], r["Longitude"]],
+            radius=6, color="red", fill=True, fill_opacity=0.8,
+            popup=popup, tooltip=f"(Proposed) {r['Name']}"
+        ).add_to(fg_proposed)
+        folium.Marker(
+            [r["Latitude"], r["Longitude"]],
+            icon=folium.DivIcon(
+                html=f"""
+                <div style="
+                    font-size: 10pt; color: red; white-space: nowrap;
+                    text-align: center; transform: translateY(12px);
+                ">{r['Name']}</div>
+                """
             )
-            folium.CircleMarker(
-                location=[r["Latitude"], r["Longitude"]],
-                radius=6, color="red", fill=True, fill_opacity=0.8,
-                popup=popup, tooltip=f"(Proposed) {r['Name']}"
-            ).add_to(fg_proposed)
-            folium.Marker(
-                [r["Latitude"], r["Longitude"]],
-                icon=folium.DivIcon(
-                    html=f"""
-                    <div style="
-                        font-size: 10pt; color: red; white-space: nowrap;
-                        text-align: center; transform: translateY(12px);
-                    ">{r['Name']}</div>
-                    """
-                )
-            ).add_to(fg_proposed)
-        fg_proposed.add_to(m)
+        ).add_to(fg_proposed)
+    fg_proposed.add_to(m)
 
-    Draw(
-        export=False,
-        draw_options={"polyline": True, "polygon": False, "rectangle": False,
-                      "circle": False, "circlemarker": False, "marker": False},
-        edit_options={"edit": True, "remove": True},
-    ).add_to(m)
-    folium.LayerControl().add_to(m)
+Draw(
+    export=False,
+    draw_options={"polyline": True, "polygon": False, "rectangle": False,
+                  "circle": False, "circlemarker": False, "marker": False},
+    edit_options={"edit": True, "remove": True},
+).add_to(m)
+folium.LayerControl().add_to(m)
 
-    map_state = st_folium(
-        m, height=600,
-        returned_objects=["last_active_drawing", "all_drawings"],
-        use_container_width=True
-    )
+map_state = st_folium(
+    m, height=600,
+    returned_objects=["last_active_drawing", "all_drawings"],
+    use_container_width=True
+)
 
-    # -------------------
-    # Section from drawn line (feet)
-    # -------------------
-    st.header("📈 Section / Profile (ft) — Soil & PWR")
-    corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
+# -------------------
+# Section from drawn line (feet) — only if main data is available
+# -------------------
+if data is None or data.empty:
+    st.info("Upload the **Main Borehole** file to enable the Section/Profile and 3D views.")
+    st.stop()
 
-    # get last drawn polyline
-    polyline_coords = None
-    drawings = map_state.get("all_drawings") or []
-    if drawings:
-        for g in reversed(drawings):
-            if g and g.get("type") == "Feature":
-                geom = g.get("geometry", {})
-                if geom.get("type") == "LineString":
-                    polyline_coords = geom.get("coordinates")  # [[lon, lat], ...]
-                    break
+st.header("📈 Section / Profile (ft) — Soil & PWR")
+corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
 
-    sec = None
-    total_len_ft = 0.0
+# get last drawn polyline
+polyline_coords = None
+drawings = map_state.get("all_drawings") or []
+if drawings:
+    for g in reversed(drawings):
+        if g and g.get("type") == "Feature":
+            geom = g.get("geometry", {})
+            if geom.get("type") == "LineString":
+                polyline_coords = geom.get("coordinates")  # [[lon, lat], ...]
+                break
 
-    if polyline_coords is None:
-        st.info("Draw a polyline on the map to define the section line.")
-    else:
-        # project to meters then convert to feet for outputs (use main data only)
-        transformer = get_transformer(center_lat, center_lon)
-        XY_m = np.array([transformer.transform(lon, lat)
-                        for lat, lon in zip(data["Latitude"], data["Longitude"])])
-        poly_xy_m = np.array([transformer.transform(lon, lat)
-                              for lon, lat in np.array(polyline_coords)])
-        chain_ft, dist_ft, total_len_ft = project_chainage_to_polyline(XY_m, poly_xy_m)
+sec = None
+total_len_ft = 0.0
 
-        keep = dist_ft <= corridor_ft
-        sec = data.loc[keep].copy()
-        sec["Chainage_ft"] = chain_ft[keep]
-        sec = sec.sort_values("Chainage_ft")
-
-        if sec.empty:
-            st.warning("No borings fall within the selected corridor width. Widen the corridor or redraw the line.")
-        else:
-            # ---- Filled-band profile (single PWR legend; unified hover) ----
-            x   = sec["Chainage_ft"].to_numpy()
-            top = sec["Top_EL"].to_numpy()
-            bot = sec["Bottom_EL"].to_numpy()
-            pwr = sec["PWR_EL"].to_numpy()  # may include NaNs
-
-            fig = go.Figure()
-
-            # Soil (green): Top -> (PWR if present else Bottom)
-            lower_soil = np.where(np.isnan(pwr), bot, pwr)
-            add_band(fig, x, top, lower_soil, "rgba(34,197,94,0.55)", "Soil", True, "soil")
-
-            # PWR (maroon): PWR -> Bottom  [single legend entry even if many segments]
-            mask = ~np.isnan(pwr)
-            first_pwr_band = True
-            if mask.any():
-                idx = np.where(mask)[0]
-                splits = np.where(np.diff(idx) > 1)[0]
-                segments = np.split(idx, splits + 1)
-                for seg in segments:
-                    xs  = x[seg]
-                    y_up = pwr[seg]
-                    y_lo = bot[seg]
-                    add_band(fig, xs, y_up, y_lo, "rgba(127,29,29,0.70)",
-                             "PWR", showlegend=first_pwr_band, legendgroup="pwrband")
-                    first_pwr_band = False
-
-            # Vertical posts at each boring
-            for xi, ytop, ybot in zip(x, top, bot):
-                fig.add_trace(go.Scatter(
-                    x=[xi, xi], y=[ybot, ytop],
-                    mode="lines",
-                    line=dict(color="black", width=2),
-                    showlegend=False,
-                    hoverinfo="skip"
-                ))
-
-            # Top & Bottom outlines (clean hover text)
-            fig.add_trace(go.Scatter(
-                x=x, y=top, mode="lines+markers",
-                line=dict(color="black", width=1),
-                marker=dict(size=5, color="black"),
-                name="Top EL (ft)",
-                hovertemplate="Top EL (ft): %{y:.2f}<extra></extra>"
-            ))
-            fig.add_trace(go.Scatter(
-                x=x, y=bot, mode="lines",
-                line=dict(color="black", width=1),
-                name="Bottom EL (ft)",
-                hovertemplate="Bottom EL (ft): %{y:.2f}<extra></extra>"
-            ))
-
-            # PWR line (dashed) & markers ONLY where PWR exists
-            if mask.any():
-                first_pwr_line = True
-                idx = np.where(mask)[0]
-                splits = np.where(np.diff(idx) > 1)[0]
-                segments = np.split(idx, splits + 1)
-                for seg in segments:
-                    xs = x[seg]; ys = pwr[seg]
-                    fig.add_trace(go.Scatter(
-                        x=xs, y=ys, mode="lines",
-                        line=dict(color="black", width=1, dash="dot"),
-                        name="PWR EL (ft)",
-                        showlegend=first_pwr_line,
-                        hoverinfo="skip",
-                        legendgroup="pwr"
-                    ))
-                    first_pwr_line = False
-                fig.add_trace(go.Scatter(
-                    x=x[mask], y=pwr[mask], mode="markers",
-                    marker=dict(size=4, color="black"),
-                    name="PWR EL (ft)",
-                    legendgroup="pwr",
-                    showlegend=False,
-                    hovertemplate="PWR EL (ft): %{y:.2f}<extra></extra>"
-                ))
-
-            # Borehole labels
-            for xi, yi, label in zip(x, top, sec["Name"]):
-                fig.add_annotation(
-                    x=xi, y=yi, text=str(label),
-                    showarrow=True, arrowhead=1, arrowsize=1, ax=0, ay=-25
-                )
-
-            # Unified vertical tooltip + spike
-            fig.update_layout(
-                title=f"Section along drawn line (Length ≈ {total_len_ft:.0f} ft, corridor ±{corridor_ft} ft)",
-                xaxis_title="Chainage (ft)",
-                yaxis_title="Elevation (ft)",
-                template="plotly_white",
-                hovermode="x unified",
-                legend=dict(orientation="h"),
-            )
-            fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor",
-                             spikethickness=1, spikedash="dot")
-
-            st.plotly_chart(fig, use_container_width=True)
-
-    # -------------------
-    # 3D Borehole View (points only, plan coordinates in feet) with lower vertical exaggeration
-    # -------------------
-    st.header("🌀 3D Borehole View (ft, Plan Coordinates)")
-    c1, c2 = st.columns([1,1])
-    with c1:
-        limit3d = st.checkbox("Limit to section corridor", value=True)
-    with c2:
-        ve = st.slider("Vertical exaggeration (display only)", 1.0, 6.0, 2.0, step=0.5)
-
-    data3d = data
-    if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
-        data3d = sec
-
-    # Project lon/lat to local UTM → meters → feet (plan coordinates)
+if polyline_coords is None:
+    st.info("Draw a polyline on the map to define the section line.")
+else:
+    # project to meters then convert to feet for outputs (use main data only)
+    center_lat, center_lon = lat_series.mean(), lon_series.mean()
     transformer = get_transformer(center_lat, center_lon)
     XY_m = np.array([transformer.transform(lon, lat)
-                     for lat, lon in zip(data3d["Latitude"], data3d["Longitude"])])
-    X_ft = XY_m[:, 0] * FT_PER_M
-    Y_ft = XY_m[:, 1] * FT_PER_M
+                    for lat, lon in zip(data["Latitude"], data["Longitude"])])
+    poly_xy_m = np.array([transformer.transform(lon, lat)
+                          for lon, lat in np.array(polyline_coords)])
+    chain_ft, dist_ft, total_len_ft = project_chainage_to_polyline(XY_m, poly_xy_m)
 
-    z_top = data3d["Top_EL"].to_numpy()
-    z_bot = data3d["Bottom_EL"].to_numpy()
-    z_pwr = data3d["PWR_EL"].to_numpy()
-    names = data3d["Name"].astype(str).to_numpy()
+    keep = dist_ft <= corridor_ft
+    sec = data.loc[keep].copy()
+    sec["Chainage_ft"] = chain_ft[keep]
+    sec = sec.sort_values("Chainage_ft")
 
-    fig3d = go.Figure()
-    fig3d.add_trace(go.Scatter3d(x=X_ft, y=Y_ft, z=z_top, mode="markers",
-        marker=dict(size=5, color="rgb(135,206,250)"), name="Top EL (ft)",
-        text=names,
-        hovertemplate="<b>%{text}</b><br>Top EL: %{z:.2f} ft<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
-    ))
-    fig3d.add_trace(go.Scatter3d(x=X_ft, y=Y_ft, z=z_bot, mode="markers",
-        marker=dict(size=4, color="rgb(90,90,90)"), name="Bottom EL (ft)",
-        text=names,
-        hovertemplate="<b>%{text}</b><br>Bottom EL: %{z:.2f} ft<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
-    ))
-    mask = ~np.isnan(z_pwr)
-    if mask.any():
-        fig3d.add_trace(go.Scatter3d(x=X_ft[mask], y=Y_ft[mask], z=z_pwr[mask], mode="markers",
-            marker=dict(size=4, color="red"), name="PWR EL (ft)",
-            text=names[mask],
-            hovertemplate="<b>%{text}</b><br>PWR EL: %{z:.2f} ft<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
+    if sec.empty:
+        st.warning("No borings fall within the selected corridor width. Widen the corridor or redraw the line.")
+    else:
+        # ---- Filled-band profile (single PWR legend; unified hover) ----
+        x   = sec["Chainage_ft"].to_numpy()
+        top = sec["Top_EL"].to_numpy()
+        bot = sec["Bottom_EL"].to_numpy()
+        pwr = sec["PWR_EL"].to_numpy()  # may include NaNs
+
+        fig = go.Figure()
+
+        # Soil (green): Top -> (PWR if present else Bottom)
+        lower_soil = np.where(np.isnan(pwr), bot, pwr)
+        add_band(fig, x, top, lower_soil, "rgba(34,197,94,0.55)", "Soil", True, "soil")
+
+        # PWR (maroon): PWR -> Bottom
+        mask = ~np.isnan(pwr)
+        first_pwr_band = True
+        if mask.any():
+            idx = np.where(mask)[0]
+            splits = np.where(np.diff(idx) > 1)[0]
+            segments = np.split(idx, splits + 1)
+            for seg in segments:
+                xs  = x[seg]
+                y_up = pwr[seg]
+                y_lo = bot[seg]
+                add_band(fig, xs, y_up, y_lo, "rgba(127,29,29,0.70)",
+                         "PWR", showlegend=first_pwr_band, legendgroup="pwrband")
+                first_pwr_band = False
+
+        # Vertical posts at each boring
+        for xi, ytop, ybot in zip(x, top, bot):
+            fig.add_trace(go.Scatter(
+                x=[xi, xi], y=[ybot, ytop],
+                mode="lines",
+                line=dict(color="black", width=2),
+                showlegend=False,
+                hoverinfo="skip"
+            ))
+
+        # Top & Bottom outlines
+        fig.add_trace(go.Scatter(
+            x=x, y=top, mode="lines+markers",
+            line=dict(color="black", width=1),
+            marker=dict(size=5, color="black"),
+            name="Top EL (ft)",
+            hovertemplate="Top EL (ft): %{y:.2f}<extra></extra>"
+        ))
+        fig.add_trace(go.Scatter(
+            x=x, y=bot, mode="lines",
+            line=dict(color="black", width=1),
+            name="Bottom EL (ft)",
+            hovertemplate="Bottom EL (ft): %{y:.2f}<extra></extra>"
         ))
 
-    fig3d.update_layout(
-        height=650,
-        scene=dict(
-            xaxis_title="Easting (ft)",
-            yaxis_title="Northing (ft)",
-            zaxis_title=f"Elevation (ft) — {ve}×",
-            aspectmode="manual",
-            aspectratio=dict(x=1, y=1, z=ve),   # lower exaggeration
-        ),
-        legend=dict(orientation="h"),
-        margin=dict(l=0, r=0, b=0, t=10),
-        scene_camera=dict(eye=dict(x=1.6, y=1.6, z=1.0))
-    )
+        # PWR line & markers where present
+        if mask.any():
+            first_pwr_line = True
+            idx = np.where(mask)[0]
+            splits = np.where(np.diff(idx) > 1)[0]
+            segments = np.split(idx, splits + 1)
+            for seg in segments:
+                xs = x[seg]; ys = pwr[seg]
+                fig.add_trace(go.Scatter(
+                    x=xs, y=ys, mode="lines",
+                    line=dict(color="black", width=1, dash="dot"),
+                    name="PWR EL (ft)",
+                    showlegend=first_pwr_line,
+                    hoverinfo="skip",
+                    legendgroup="pwr"
+                ))
+                first_pwr_line = False
+            fig.add_trace(go.Scatter(
+                x=x[mask], y=pwr[mask], mode="markers",
+                marker=dict(size=4, color="black"),
+                name="PWR EL (ft)",
+                legendgroup="pwr",
+                showlegend=False,
+                hovertemplate="PWR EL (ft): %{y:.2f}<extra></extra>"
+            ))
 
-    st.plotly_chart(fig3d, use_container_width=True)
+        # Borehole labels
+        for xi, yi, label in zip(x, top, sec["Name"]):
+            fig.add_annotation(
+                x=xi, y=yi, text=str(label),
+                showarrow=True, arrowhead=1, arrowsize=1, ax=0, ay=-25
+            )
+
+        # Unified vertical tooltip + spike
+        fig.update_layout(
+            title=f"Section along drawn line (Length ≈ {total_len_ft:.0f} ft, corridor ±{corridor_ft} ft)",
+            xaxis_title="Chainage (ft)",
+            yaxis_title="Elevation (ft)",
+            template="plotly_white",
+            hovermode="x unified",
+            legend=dict(orientation="h"),
+        )
+        fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor",
+                         spikethickness=1, spikedash="dot")
+
+        st.plotly_chart(fig, use_container_width=True)
+
+# -------------------
+# 3D Borehole View (points only, plan coordinates in feet)
+# -------------------
+st.header("🌀 3D Borehole View (ft, Plan Coordinates)")
+c1, c2 = st.columns([1,1])
+with c1:
+    limit3d = st.checkbox("Limit to section corridor", value=True)
+with c2:
+    ve = st.slider("Vertical exaggeration (display only)", 1.0, 6.0, 2.0, step=0.5)
+
+data3d = data
+if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
+    data3d = sec
+
+# Project lon/lat to local UTM → meters → feet (plan coordinates)
+center_lat, center_lon = lat_series.mean(), lon_series.mean()
+transformer = get_transformer(center_lat, center_lon)
+XY_m = np.array([transformer.transform(lon, lat)
+                 for lat, lon in zip(data3d["Latitude"], data3d["Longitude"])])
+X_ft = XY_m[:, 0] * FT_PER_M
+Y_ft = XY_m[:, 1] * FT_PER_M
+
+z_top = data3d["Top_EL"].to_numpy()
+z_bot = data3d["Bottom_EL"].to_numpy()
+z_pwr = data3d["PWR_EL"].to_numpy()
+names = data3d["Name"].astype(str).to_numpy()
+
+fig3d = go.Figure()
+fig3d.add_trace(go.Scatter3d(x=X_ft, y=Y_ft, z=z_top, mode="markers",
+    marker=dict(size=5, color="rgb(135,206,250)"), name="Top EL (ft)",
+    text=names,
+    hovertemplate="<b>%{text}</b><br>Top EL: %{z:.2f} ft<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
+))
+fig3d.add_trace(go.Scatter3d(x=X_ft, y=Y_ft, z=z_bot, mode="markers",
+    marker=dict(size=4, color="rgb(90,90,90)"), name="Bottom EL (ft)",
+    text=names,
+    hovertemplate="<b>%{text}</b><br>Bottom EL: %{z:.2f} ft<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
+))
+mask = ~np.isnan(z_pwr)
+if mask.any():
+    fig3d.add_trace(go.Scatter3d(x=X_ft[mask], y=Y_ft[mask], z=z_pwr[mask], mode="markers",
+        marker=dict(size=4, color="red"), name="PWR EL (ft)",
+        text=names[mask],
+        hovertemplate="<b>%{text}</b><br>PWR EL: %{z:.2f} ft<br>E: %{x:.1f} ft, N: %{y:.1f} ft<extra></extra>"
+    ))
+
+fig3d.update_layout(
+    height=650,
+    scene=dict(
+        xaxis_title="Easting (ft)",
+        yaxis_title="Northing (ft)",
+        zaxis_title=f"Elevation (ft) — {ve}×",
+        aspectmode="manual",
+        aspectratio=dict(x=1, y=1, z=ve),
+    ),
+    legend=dict(orientation="h"),
+    margin=dict(l=0, r=0, b=0, t=10),
+    scene_camera=dict(eye=dict(x=1.6, y=1.6, z=1.0))
+)
+
+st.plotly_chart(fig3d, use_container_width=True)
