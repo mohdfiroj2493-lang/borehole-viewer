@@ -1,4 +1,4 @@
-# Borehole Visualization Tool — Proposed markers + BR/AR + BT/AR label in section
+# Borehole Visualization Tool — Proposed markers + BR/AR + BT/AR labels at BOTTOM
 # Units: FEET
 
 import pandas as pd
@@ -65,6 +65,7 @@ def project_chainage_to_polyline(XY_m, poly_xy_m):
 
 
 def add_band(fig, x_arr, y_upper, y_lower, fill_rgba, name, showlegend=True, legendgroup=None):
+    """Add a filled band polygon between y_upper and y_lower along x_arr."""
     if len(x_arr) < 2:
         return
     x_closed = np.concatenate([x_arr, x_arr[::-1]])
@@ -115,13 +116,13 @@ if uploaded_file:
     c_pwr_el = pick(df.columns, 'pwr el', 'pwr elevation', 'weathered rock el', 'weathered rock elevation')
     c_pwr_d  = pick(df.columns, 'pwr depth', 'weathered rock depth')
 
-    # Bedrock (BR / BT) and Auger Refusal (AR)
+    # Bedrock (BR/BT) and Auger Refusal (AR)
     c_br_el  = pick(df.columns, 'br el', 'bt el', 'bedrock el', 'rock el', 'br elevation', 'bedrock elevation', 'rock elevation')
     c_br_d   = pick(df.columns, 'br depth', 'bt depth', 'bedrock depth', 'rock depth')
     c_ar_el  = pick(df.columns, 'ar el', 'ar elevation', 'auger refusal el', 'refusal el')
     c_ar_d   = pick(df.columns, 'ar depth', 'auger refusal depth', 'refusal depth')
 
-    # BT/AR flag column (your screenshot)
+    # BT/AR flag column (as in your sheet)
     c_bt_ar  = pick(df.columns, 'bt/ar', 'br/ar')
 
     # Build dataframe (all elevations/depths assumed ft from Excel)
@@ -142,7 +143,7 @@ if uploaded_file:
         pwr_d = pd.to_numeric(df[c_pwr_d], errors="coerce")
         data['PWR_EL'] = data['PWR_EL'].fillna(data['Top_EL'] - pwr_d)
 
-    # BR (bedrock) elevation
+    # BR elevation
     data['BR_EL'] = np.nan
     if c_br_el:
         data['BR_EL'] = pd.to_numeric(df[c_br_el], errors="coerce")
@@ -158,7 +159,7 @@ if uploaded_file:
         ar_d = pd.to_numeric(df[c_ar_d], errors="coerce")
         data['AR_EL'] = data['AR_EL'].fillna(data['Top_EL'] - ar_d)
 
-    # BT/AR flag (clean up "nan")
+    # BT/AR flag
     if c_bt_ar:
         flag = df[c_bt_ar].astype(str).str.strip()
         data['BT_AR_Flag'] = flag.replace({'nan': '', 'NaN': '', 'None': '', 'NONE': ''})
@@ -321,7 +322,7 @@ if data is None or data.empty:
     st.info("Upload the **Main Borehole** file to enable the Section/Profile and 3D views.")
     st.stop()
 
-st.header("📈 Section / Profile (ft) — Soil, PWR, BR, AR (+ Proposed locations; labels show BT/AR)")
+st.header("📈 Section / Profile (ft) — Soil, PWR, BR, AR (+ Proposed at bottom; labels show BT/AR)")
 
 corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
 
@@ -456,16 +457,18 @@ else:
                 hovertemplate="AR EL (ft): %{y:.2f}<extra></extra>"
             ))
 
-        # Borehole labels — include BT/AR flag right in the text
+        # Borehole labels — place at BOTTOM instead of top, include BT/AR flag
         flags = sec["BT_AR_Flag"].astype(str).str.strip() if "BT_AR_Flag" in sec.columns else pd.Series([""]*len(sec))
-        for xi, yi, label, flag in zip(x, top, sec["Name"], flags):
+        for xi, yb, label, flag in zip(x, bot, sec["Name"], flags):
             txt = f"{label} ({flag})" if flag and flag.lower() != 'nan' else str(label)
             fig.add_annotation(
-                x=xi, y=yi, text=txt,
-                showarrow=True, arrowhead=1, arrowsize=1, ax=0, ay=-25
+                x=xi, y=yb,  # anchor at Bottom EL
+                text=txt,
+                showarrow=True, arrowhead=1, arrowsize=1,
+                ax=0, ay=25  # positive ay -> place text below the point
             )
 
-        # ---------- Proposed positions: name + location only ----------
+        # ---------- Proposed positions: name + location only, at bottom ----------
         if proposed is not None and not proposed.empty:
             XYp_m = np.array([transformer.transform(lon, lat)
                               for lat, lon in zip(proposed["Latitude"], proposed["Longitude"])])
@@ -475,11 +478,11 @@ else:
             if not prop_sec.empty:
                 prop_sec["Chainage_ft"] = chain_p_ft[keep_p]
                 xprop = prop_sec["Chainage_ft"].to_numpy()
-                # place markers just above the highest top elevation
-                y_top = float(np.nanmax(top))
-                y_bottom = float(np.nanmin(bot))
-                y_range = max(y_top - y_bottom, 1.0)
-                y_marker = y_top + max(0.03 * y_range, 5.0)
+
+                ymin = float(np.nanmin(bot))
+                ymax = float(np.nanmax(top))
+                yrng = max(ymax - ymin, 1.0)
+                y_marker = ymin - max(0.03 * yrng, 5.0)  # below bottom
 
                 fig.add_trace(go.Scatter(
                     x=xprop,
@@ -487,11 +490,20 @@ else:
                     mode="markers+text",
                     marker=dict(symbol="triangle-up", size=10, color="red"),
                     text=prop_sec["Name"].astype(str),
-                    textposition="top center",
+                    textposition="bottom center",
                     name="Proposed (location)",
                     hovertemplate="<b>%{text}</b><br>Chainage: %{x:.1f} ft<extra></extra>"
                 ))
-        # -------------------------------------------------------------
+                # expand y-axis to ensure visibility of bottom markers/labels
+                pad = max(0.06 * yrng, 10.0)
+                fig.update_yaxes(range=[ymin - pad, ymax + pad])
+        else:
+            # still pad a little so bottom labels aren't clipped
+            ymin = float(np.nanmin(bot))
+            ymax = float(np.nanmax(top))
+            pad = max(0.04 * (ymax - ymin), 8.0)
+            fig.update_yaxes(range=[ymin - pad, ymax + pad])
+        # ------------------------------------------------------------------------
 
         # Unified vertical tooltip + spike
         fig.update_layout(
