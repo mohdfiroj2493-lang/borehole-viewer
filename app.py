@@ -1,4 +1,4 @@
-# Borehole Visualization Tool — PWR bridging, AR/BR styled at feature elevation, Proposed at TOP
+# Borehole Visualization Tool — PWR bridging, AR/BT styled at feature elevation, Proposed at TOP
 # Units: FEET
 
 import pandas as pd
@@ -116,9 +116,9 @@ if uploaded_file:
     c_pwr_el = pick(df.columns, 'pwr el', 'pwr elevation', 'weathered rock el', 'weathered rock elevation')
     c_pwr_d  = pick(df.columns, 'pwr depth', 'weathered rock depth')
 
-    # Bedrock (BR/BT) and Auger Refusal (AR)
-    c_br_el  = pick(df.columns, 'br el', 'bt el', 'bedrock el', 'rock el', 'br elevation', 'bedrock elevation', 'rock elevation')
-    c_br_d   = pick(df.columns, 'br depth', 'bt depth', 'bedrock depth', 'rock depth')
+    # Bedrock Top (BT) and Auger Refusal (AR) — accept BR synonyms too
+    c_bt_el  = pick(df.columns, 'bt el', 'br el', 'bedrock el', 'rock el', 'bt elevation', 'br elevation', 'bedrock elevation', 'rock elevation')
+    c_bt_d   = pick(df.columns, 'bt depth', 'br depth', 'bedrock depth', 'rock depth')
     c_ar_el  = pick(df.columns, 'ar el', 'ar elevation', 'auger refusal el', 'refusal el')
     c_ar_d   = pick(df.columns, 'ar depth', 'auger refusal depth', 'refusal depth')
 
@@ -143,13 +143,13 @@ if uploaded_file:
         pwr_d = pd.to_numeric(df[c_pwr_d], errors="coerce")
         data['PWR_EL'] = data['PWR_EL'].fillna(data['Top_EL'] - pwr_d)
 
-    # BR elevation
-    data['BR_EL'] = np.nan
-    if c_br_el:
-        data['BR_EL'] = pd.to_numeric(df[c_br_el], errors="coerce")
-    if c_br_d:
-        br_d = pd.to_numeric(df[c_br_d], errors="coerce")
-        data['BR_EL'] = data['BR_EL'].fillna(data['Top_EL'] - br_d)
+    # BT elevation
+    data['BT_EL'] = np.nan
+    if c_bt_el:
+        data['BT_EL'] = pd.to_numeric(df[c_bt_el], errors="coerce")
+    if c_bt_d:
+        bt_d = pd.to_numeric(df[c_bt_d], errors="coerce")
+        data['BT_EL'] = data['BT_EL'].fillna(data['Top_EL'] - bt_d)
 
     # AR elevation
     data['AR_EL'] = np.nan
@@ -161,8 +161,9 @@ if uploaded_file:
 
     # BT/AR flag
     if c_bt_ar:
-        flag = df[c_bt_ar].astype(str).str.strip()
-        data['BT_AR_Flag'] = flag.replace({'nan': '', 'NaN': '', 'None': '', 'NONE': ''})
+        flag = df[c_bt_ar].astype(str).str.strip().str.upper()
+        # Normalize any "BR" to "BT" for display
+        data['BT_AR_Flag'] = flag.replace({'BR': 'BT', 'NAN': '', 'NONE': ''})
 
     # Clean
     data = data.dropna(subset=["Latitude", "Longitude"]).reset_index(drop=True)
@@ -257,7 +258,7 @@ if data is not None and not data.empty:
             popup += f" &nbsp; <i>({r['BT_AR_Flag']})</i>"
         if pd.notna(r['Top_EL']):    popup += f"<br>Top EL: {r['Top_EL']:.2f} ft"
         if pd.notna(r.get('PWR_EL', np.nan)): popup += f"<br>PWR EL: {r['PWR_EL']:.2f} ft"
-        if pd.notna(r.get('BR_EL', np.nan)):  popup += f"<br>BR EL: {r['BR_EL']:.2f} ft"
+        if pd.notna(r.get('BT_EL', np.nan)):  popup += f"<br>BT EL: {r['BT_EL']:.2f} ft"
         if pd.notna(r.get('AR_EL', np.nan)):  popup += f"<br>AR EL: {r['AR_EL']:.2f} ft"
         if pd.notna(r['Bottom_EL']): popup += f"<br>Bottom EL: {r['Bottom_EL']:.2f} ft"
 
@@ -322,19 +323,19 @@ if data is None or data.empty:
     st.info("Upload the **Main Borehole** file to enable the Section/Profile and 3D views.")
     st.stop()
 
-st.header("📈 Section / Profile (ft) — PWR bridging; Names at top; AR/BR styled; Proposed at top")
+st.header("📈 Section / Profile (ft) — PWR bridging; Names at top; AR/BT styled; Proposed at top")
 
 corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
 
-# AR/BR label styling controls
+# AR/BT label styling controls
 cA, cB, cC = st.columns([1,1,1])
 with cA:
-    ar_color = st.color_picker("AR label color", value="#7F1D1D")   # maroon-ish
+    ar_color = st.color_picker("AR label color", value="#111111")
 with cB:
-    br_color = st.color_picker("BR label color", value="#7C3AED")   # purple-ish (match screenshot feel)
+    bt_color = st.color_picker("BT label color", value="#5B21B6")  # purple-ish
 with cC:
-    flag_font_size = st.slider("AR/BR font size", 8, 22, 12, step=1)
-flag_yshift_px = st.slider("AR/BR vertical offset (px)", -20, 40, -6, step=1,
+    flag_font_size = st.slider("AR/BT font size", 8, 22, 14, step=1)
+flag_yshift_px = st.slider("AR/BT vertical offset (px)", -20, 40, -6, step=1,
                            help="Negative = above the line; positive = below")
 flag_font_family = "Arial Black, Arial, sans-serif"
 
@@ -374,7 +375,7 @@ else:
         top = sec["Top_EL"].to_numpy()
         bot = sec["Bottom_EL"].to_numpy()
         pwr = sec["PWR_EL"].to_numpy()
-        br  = sec["BR_EL"].to_numpy() if "BR_EL" in sec.columns else np.full_like(top, np.nan)
+        bt  = sec["BT_EL"].to_numpy() if "BT_EL" in sec.columns else np.full_like(top, np.nan)
         ar  = sec["AR_EL"].to_numpy() if "AR_EL" in sec.columns else np.full_like(top, np.nan)
 
         fig = go.Figure()
@@ -456,15 +457,15 @@ else:
                 hovertemplate="PWR EL (ft): %{y:.2f}<extra></extra>"
             ))
 
-        # BR line + diamond markers
-        mask_br = ~np.isnan(br)
-        if mask_br.any():
+        # BT line + diamond markers
+        mask_bt = ~np.isnan(bt)
+        if mask_bt.any():
             fig.add_trace(go.Scatter(
-                x=x[mask_br], y=br[mask_br], mode="lines+markers",
+                x=x[mask_bt], y=bt[mask_bt], mode="lines+markers",
                 line=dict(color="black", width=1, dash="dash"),
                 marker=dict(symbol="diamond", size=7),
-                name="BR EL (ft)",
-                hovertemplate="BR EL (ft): %{y:.2f}<extra></extra>"
+                name="BT EL (ft)",
+                hovertemplate="BT EL (ft): %{y:.2f}<extra></extra>"
             ))
 
         # AR line + cross markers
@@ -488,23 +489,23 @@ else:
                 ax=0, ay=-25  # above top
             )
 
-        # AR/BR label at feature elevation (fallback to bottom)
+        # AR/BT label at feature elevation (fallback to bottom)
         flags = sec["BT_AR_Flag"].astype(str).str.upper().str.strip() if "BT_AR_Flag" in sec.columns else pd.Series([""]*len(sec))
-        for xi, btm, br_el, ar_el, flag in zip(x, bot, br, ar, flags):
+        for xi, btm, bt_el, ar_el, flag in zip(x, bot, bt, ar, flags):
             if not flag or flag == "NAN":
                 continue
-            if flag == "BT":  # normalize
-                flag = "BR"
+            # treat any BR as BT for display
+            flag = "BT" if flag == "BR" else flag
 
             if flag == "AR" and not np.isnan(ar_el):
                 y_anchor = ar_el
                 color = ar_color
-            elif flag == "BR" and not np.isnan(br_el):
-                y_anchor = br_el
-                color = br_color
+            elif flag == "BT" and not np.isnan(bt_el):
+                y_anchor = bt_el
+                color = bt_color
             else:
                 y_anchor = btm
-                color = ar_color if flag == "AR" else br_color
+                color = ar_color if flag == "AR" else bt_color
 
             fig.add_annotation(
                 x=xi, y=y_anchor,
