@@ -1,5 +1,4 @@
-# Borehole Visualization Tool — Names at TOP, BT/AR at bottom of each boring,
-# Proposed bore names + markers at TOP
+# Borehole Visualization Tool — Names at TOP, AR/BR styled at feature elevation, Proposed at TOP
 # Units: FEET
 
 import pandas as pd
@@ -126,7 +125,7 @@ if uploaded_file:
     # BT/AR flag column (as in your sheet)
     c_bt_ar  = pick(df.columns, 'bt/ar', 'br/ar')
 
-    # Build dataframe (all elevations/depths assumed ft from Excel)
+    # Build dataframe (ft)
     data = pd.DataFrame({
         'Name': df[c_name],
         'Latitude': df[c_lat],
@@ -246,11 +245,11 @@ folium.TileLayer(
     name="Satellite", overlay=False, control=True
 ).add_to(m)
 
-# Feature groups for layer control
+# Feature groups
 fg_existing = folium.FeatureGroup(name="Existing Boreholes", show=True)
 fg_proposed = folium.FeatureGroup(name="Proposed Boreholes", show=True)
 
-# Existing boreholes (blue)
+# Existing markers
 if data is not None and not data.empty:
     for _, r in data.iterrows():
         popup = f"<b>{r['Name']}</b>"
@@ -280,7 +279,7 @@ if data is not None and not data.empty:
         ).add_to(fg_existing)
     fg_existing.add_to(m)
 
-# Proposed boreholes (red)
+# Proposed markers
 if proposed is not None and not proposed.empty:
     for _, r in proposed.iterrows():
         popup = f"<b>{r['Name']}</b><br>Lat: {r['Latitude']:.6f}, Lon: {r['Longitude']:.6f}"
@@ -317,15 +316,27 @@ map_state = st_folium(
 )
 
 # -------------------
-# Section/Profile (ft) — needs main data
+# Section/Profile
 # -------------------
 if data is None or data.empty:
     st.info("Upload the **Main Borehole** file to enable the Section/Profile and 3D views.")
     st.stop()
 
-st.header("📈 Section / Profile (ft) — Names at top; BT/AR under each boring; Proposed names at top")
+st.header("📈 Section / Profile (ft) — Names at top; AR/BR styled at feature; Proposed names at top")
 
 corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
+
+# AR/BR label styling controls
+cA, cB, cC = st.columns([1,1,1])
+with cA:
+    ar_color = st.color_picker("AR label color", value="#7F1D1D")   # maroon-ish
+with cB:
+    br_color = st.color_picker("BR label color", value="#1E40AF")   # blue-ish
+with cC:
+    flag_font_size = st.slider("AR/BR font size", 8, 22, 12, step=1)
+flag_yshift_px = st.slider("AR/BR vertical offset (px)", -20, 40, -6, step=1,
+                           help="Negative = above the line; positive = below")
+flag_font_family = "Arial Black, Arial, sans-serif"
 
 # get last drawn polyline
 polyline_coords = None
@@ -372,7 +383,7 @@ else:
         lower_soil = np.where(np.isnan(pwr), bot, pwr)
         add_band(fig, x, top, lower_soil, "rgba(34,197,94,0.55)", "Soil", True, "soil")
 
-        # PWR filled band to Bottom (maroon) where present
+        # PWR band to Bottom
         mask_pwr = ~np.isnan(pwr)
         first_pwr_band = True
         if mask_pwr.any():
@@ -387,7 +398,7 @@ else:
                          "PWR", showlegend=first_pwr_band, legendgroup="pwrband")
                 first_pwr_band = False
 
-        # Posts at each boring
+        # Posts
         for xi, ytop, ybot in zip(x, top, bot):
             fig.add_trace(go.Scatter(
                 x=[xi, xi], y=[ybot, ytop],
@@ -410,7 +421,7 @@ else:
             hovertemplate="Bottom EL (ft): %{y:.2f}<extra></extra>"
         ))
 
-        # PWR line & markers where present
+        # PWR line & markers
         if mask_pwr.any():
             first_pwr_line = True
             idx = np.where(mask_pwr)[0]
@@ -458,31 +469,45 @@ else:
                 hovertemplate="AR EL (ft): %{y:.2f}<extra></extra>"
             ))
 
-        # ----- Labels: Name at TOP; BT/AR flag at BOTTOM of each boring -----
-        flags = sec["BT_AR_Flag"].astype(str).str.strip() if "BT_AR_Flag" in sec.columns else pd.Series([""]*len(sec))
-
-        # Name at top (above Top EL)
+        # ---------- Labels ----------
+        # Names at top
         for xi, yt, label in zip(x, top, sec["Name"]):
             fig.add_annotation(
                 x=xi, y=yt,
                 text=str(label),
                 showarrow=True, arrowhead=1, arrowsize=1,
-                ax=0, ay=-25  # above
+                ax=0, ay=-25  # above top
             )
 
-        # BT/AR at bottom of each post (just below Bottom EL)
-        for xi, yb, flag in zip(x, bot, flags):
-            flag_str = str(flag).strip()
-            if flag_str and flag_str.lower() != 'nan':
-                fig.add_annotation(
-                    x=xi, y=yb,
-                    text=flag_str,
-                    showarrow=False,
-                    yshift=18  # slightly below the bottom
-                )
-        # --------------------------------------------------------------------
+        # AR/BR label at feature elevation (fallback to bottom)
+        flags = sec["BT_AR_Flag"].astype(str).str.upper().str.strip() if "BT_AR_Flag" in sec.columns else pd.Series([""]*len(sec))
+        for xi, btm, br_el, ar_el, flag in zip(x, bot, br, ar, flags):
+            if not flag or flag == "NAN":
+                continue
+            # normalize BT -> BR
+            if flag == "BT":
+                flag = "BR"
+            if flag == "AR" and not np.isnan(ar_el):
+                y_anchor = ar_el
+                color = ar_color
+            elif flag == "BR" and not np.isnan(br_el):
+                y_anchor = br_el
+                color = br_color
+            else:
+                y_anchor = btm
+                color = ar_color if flag == "AR" else br_color
 
-        # ---------- Proposed positions: names + markers at TOP ----------
+            fig.add_annotation(
+                x=xi, y=y_anchor,
+                text=flag,
+                showarrow=False,
+                yshift=flag_yshift_px,
+                font=dict(size=flag_font_size, color=color, family=flag_font_family),
+                align="center"
+            )
+        # ---------------------------
+
+        # ---------- Proposed positions: names + triangle markers at TOP ----------
         if proposed is not None and not proposed.empty:
             XYp_m = np.array([transformer.transform(lon, lat)
                               for lat, lon in zip(proposed["Latitude"], proposed["Longitude"])])
@@ -509,20 +534,20 @@ else:
                     hovertemplate="<b>%{text}</b><br>Chainage: %{x:.1f} ft<extra></extra>"
                 ))
 
-                # Expand y-range to fit top labels
+                # Expand y-range for top labels
                 pad_top = max(0.08 * yrng, 12.0)
                 pad_bot = max(0.04 * yrng, 8.0)
                 fig.update_yaxes(range=[ymin - pad_bot, ymax + pad_top])
         else:
-            # generic padding so top/bottom labels aren't clipped
+            # Generic padding so top/bottom labels aren't clipped
             ymin = float(np.nanmin(bot))
             ymax = float(np.nanmax(top))
             pad_top = max(0.06 * (ymax - ymin), 10.0)
             pad_bot = max(0.04 * (ymax - ymin), 8.0)
             fig.update_yaxes(range=[ymin - pad_bot, ymax + pad_top])
-        # -----------------------------------------------------------------
+        # ------------------------------------------------------------------------
 
-        # Unified vertical tooltip + spike
+        # Layout
         fig.update_layout(
             title=f"Section along drawn line (Length ≈ {total_len_ft:.0f} ft, corridor ±{corridor_ft} ft)",
             xaxis_title="Chainage (ft)",
@@ -550,6 +575,7 @@ data3d = data
 if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
     data3d = sec
 
+# Project to local UTM -> feet
 transformer = get_transformer(center_lat, center_lon)
 XY_m = np.array([transformer.transform(lon, lat)
                  for lat, lon in zip(data3d["Latitude"], data3d["Longitude"])])
