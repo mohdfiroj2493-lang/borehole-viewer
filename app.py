@@ -1,4 +1,5 @@
-# Borehole Visualization Tool — Names at TOP, BT/AR at BOTTOM
+# Borehole Visualization Tool — Names at TOP, BT/AR at bottom of each boring,
+# Proposed bore names + markers at TOP
 # Units: FEET
 
 import pandas as pd
@@ -322,7 +323,7 @@ if data is None or data.empty:
     st.info("Upload the **Main Borehole** file to enable the Section/Profile and 3D views.")
     st.stop()
 
-st.header("📈 Section / Profile (ft) — Names at top, BT/AR at bottom (+ Proposed locations)")
+st.header("📈 Section / Profile (ft) — Names at top; BT/AR under each boring; Proposed names at top")
 
 corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
 
@@ -457,7 +458,7 @@ else:
                 hovertemplate="AR EL (ft): %{y:.2f}<extra></extra>"
             ))
 
-        # ----- Labels: Name at TOP; BT/AR flag ONLY at BOTTOM -----
+        # ----- Labels: Name at TOP; BT/AR flag at BOTTOM of each boring -----
         flags = sec["BT_AR_Flag"].astype(str).str.strip() if "BT_AR_Flag" in sec.columns else pd.Series([""]*len(sec))
 
         # Name at top (above Top EL)
@@ -466,10 +467,10 @@ else:
                 x=xi, y=yt,
                 text=str(label),
                 showarrow=True, arrowhead=1, arrowsize=1,
-                ax=0, ay=-25  # negative -> above
+                ax=0, ay=-25  # above
             )
 
-        # BT/AR flag at bottom (below Bottom EL); show only if non-empty
+        # BT/AR at bottom of each post (just below Bottom EL)
         for xi, yb, flag in zip(x, bot, flags):
             flag_str = str(flag).strip()
             if flag_str and flag_str.lower() != 'nan':
@@ -477,11 +478,11 @@ else:
                     x=xi, y=yb,
                     text=flag_str,
                     showarrow=False,
-                    yshift=18  # place text below the bottom
+                    yshift=18  # slightly below the bottom
                 )
-        # ----------------------------------------------------------
+        # --------------------------------------------------------------------
 
-        # ---------- Proposed positions: name + location only, at bottom ----------
+        # ---------- Proposed positions: names + markers at TOP ----------
         if proposed is not None and not proposed.empty:
             XYp_m = np.array([transformer.transform(lon, lat)
                               for lat, lon in zip(proposed["Latitude"], proposed["Longitude"])])
@@ -495,28 +496,31 @@ else:
                 ymin = float(np.nanmin(bot))
                 ymax = float(np.nanmax(top))
                 yrng = max(ymax - ymin, 1.0)
-                y_marker = ymin - max(0.03 * yrng, 5.0)  # slightly below bottom
 
+                y_prop_top = ymax + max(0.03 * yrng, 8.0)
                 fig.add_trace(go.Scatter(
                     x=xprop,
-                    y=[y_marker] * len(xprop),
+                    y=[y_prop_top] * len(xprop),
                     mode="markers+text",
                     marker=dict(symbol="triangle-up", size=10, color="red"),
                     text=prop_sec["Name"].astype(str),
-                    textposition="bottom center",
+                    textposition="top center",
                     name="Proposed (location)",
                     hovertemplate="<b>%{text}</b><br>Chainage: %{x:.1f} ft<extra></extra>"
                 ))
-                # expand y-axis to ensure visibility of bottom markers/labels
-                pad = max(0.06 * yrng, 10.0)
-                fig.update_yaxes(range=[ymin - pad, ymax + pad])
+
+                # Expand y-range to fit top labels
+                pad_top = max(0.08 * yrng, 12.0)
+                pad_bot = max(0.04 * yrng, 8.0)
+                fig.update_yaxes(range=[ymin - pad_bot, ymax + pad_top])
         else:
-            # still pad a little so top/bottom labels aren't clipped
+            # generic padding so top/bottom labels aren't clipped
             ymin = float(np.nanmin(bot))
             ymax = float(np.nanmax(top))
-            pad = max(0.04 * (ymax - ymin), 8.0)
-            fig.update_yaxes(range=[ymin - pad, ymax + pad])
-        # ------------------------------------------------------------------------
+            pad_top = max(0.06 * (ymax - ymin), 10.0)
+            pad_bot = max(0.04 * (ymax - ymin), 8.0)
+            fig.update_yaxes(range=[ymin - pad_bot, ymax + pad_top])
+        # -----------------------------------------------------------------
 
         # Unified vertical tooltip + spike
         fig.update_layout(
