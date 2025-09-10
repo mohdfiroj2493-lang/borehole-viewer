@@ -1,4 +1,5 @@
 # Borehole Visualization Tool — with Optional Proposed Bore Logs (red layer)
+# Proposed borings appear in section as red triangles with name only (location along chainage)
 # Units: FEET (display only)
 
 import pandas as pd
@@ -224,7 +225,7 @@ if data is not None and not data.empty:
     for _, r in data.iterrows():
         popup = (
             f"<b>{r['Name']}</b><br>"
-            f"Top EL: {r['Top_EL']:.2f} ft" if pd.notna(r['Top_EL']) else "<b>%s</b><br>Top EL: N/A" % r['Name']
+            f"Top EL: {r['Top_EL']:.2f} ft" if pd.notna(r['Top_EL']) else f"<b>{r['Name']}</b><br>Top EL: N/A"
         )
         popup += (
             f"<br>PWR EL: {('%.2f ft' % r['PWR_EL']) if pd.notna(r['PWR_EL']) else 'N/A'}"
@@ -294,7 +295,8 @@ if data is None or data.empty:
     st.info("Upload the **Main Borehole** file to enable the Section/Profile and 3D views.")
     st.stop()
 
-st.header("📈 Section / Profile (ft) — Soil & PWR")
+st.header("📈 Section / Profile (ft) — Soil & PWR (+ Proposed locations)")
+
 corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
 
 # get last drawn polyline
@@ -315,7 +317,6 @@ if polyline_coords is None:
     st.info("Draw a polyline on the map to define the section line.")
 else:
     # project to meters then convert to feet for outputs (use main data only)
-    center_lat, center_lon = lat_series.mean(), lon_series.mean()
     transformer = get_transformer(center_lat, center_lon)
     XY_m = np.array([transformer.transform(lon, lat)
                     for lat, lon in zip(data["Latitude"], data["Longitude"])])
@@ -409,12 +410,42 @@ else:
                 hovertemplate="PWR EL (ft): %{y:.2f}<extra></extra>"
             ))
 
-        # Borehole labels
+        # Borehole labels (existing)
         for xi, yi, label in zip(x, top, sec["Name"]):
             fig.add_annotation(
                 x=xi, y=yi, text=str(label),
                 showarrow=True, arrowhead=1, arrowsize=1, ax=0, ay=-25
             )
+
+        # ---------- Proposed positions: name + location only ----------
+        if proposed is not None and not proposed.empty:
+            # Compute proposed chainage vs the same polyline
+            XYp_m = np.array([transformer.transform(lon, lat)
+                              for lat, lon in zip(proposed["Latitude"], proposed["Longitude"])])
+            chain_p_ft, dist_p_ft, _ = project_chainage_to_polyline(XYp_m, poly_xy_m)
+            keep_p = dist_p_ft <= corridor_ft
+            prop_sec = proposed.loc[keep_p].copy()
+            if not prop_sec.empty:
+                prop_sec["Chainage_ft"] = chain_p_ft[keep_p]
+                xprop = prop_sec["Chainage_ft"].to_numpy()
+
+                # place markers just above the highest top elevation
+                y_top = float(np.nanmax(top))
+                y_bottom = float(np.nanmin(bot))
+                y_range = max(y_top - y_bottom, 1.0)
+                y_marker = y_top + max(0.03 * y_range, 5.0)
+
+                fig.add_trace(go.Scatter(
+                    x=xprop,
+                    y=[y_marker] * len(xprop),
+                    mode="markers+text",
+                    marker=dict(symbol="triangle-up", size=10, color="red"),
+                    text=prop_sec["Name"].astype(str),
+                    textposition="top center",
+                    name="Proposed (location)",
+                    hovertemplate="<b>%{text}</b><br>Chainage: %{x:.1f} ft<extra></extra>"
+                ))
+        # -------------------------------------------------------------
 
         # Unified vertical tooltip + spike
         fig.update_layout(
@@ -445,7 +476,6 @@ if limit3d and 'sec' in locals() and sec is not None and not sec.empty:
     data3d = sec
 
 # Project lon/lat to local UTM → meters → feet (plan coordinates)
-center_lat, center_lon = lat_series.mean(), lon_series.mean()
 transformer = get_transformer(center_lat, center_lon)
 XY_m = np.array([transformer.transform(lon, lat)
                  for lat, lon in zip(data3d["Latitude"], data3d["Longitude"])])
