@@ -1,4 +1,4 @@
-# Borehole Visualization Tool — Proposed markers + BR/AR + BT/AR labels at BOTTOM
+# Borehole Visualization Tool — Names at TOP, BT/AR at BOTTOM
 # Units: FEET
 
 import pandas as pd
@@ -322,7 +322,7 @@ if data is None or data.empty:
     st.info("Upload the **Main Borehole** file to enable the Section/Profile and 3D views.")
     st.stop()
 
-st.header("📈 Section / Profile (ft) — Soil, PWR, BR, AR (+ Proposed at bottom; labels show BT/AR)")
+st.header("📈 Section / Profile (ft) — Names at top, BT/AR at bottom (+ Proposed locations)")
 
 corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
 
@@ -457,16 +457,29 @@ else:
                 hovertemplate="AR EL (ft): %{y:.2f}<extra></extra>"
             ))
 
-        # Borehole labels — place at BOTTOM instead of top, include BT/AR flag
+        # ----- Labels: Name at TOP; BT/AR flag ONLY at BOTTOM -----
         flags = sec["BT_AR_Flag"].astype(str).str.strip() if "BT_AR_Flag" in sec.columns else pd.Series([""]*len(sec))
-        for xi, yb, label, flag in zip(x, bot, sec["Name"], flags):
-            txt = f"{label} ({flag})" if flag and flag.lower() != 'nan' else str(label)
+
+        # Name at top (above Top EL)
+        for xi, yt, label in zip(x, top, sec["Name"]):
             fig.add_annotation(
-                x=xi, y=yb,  # anchor at Bottom EL
-                text=txt,
+                x=xi, y=yt,
+                text=str(label),
                 showarrow=True, arrowhead=1, arrowsize=1,
-                ax=0, ay=25  # positive ay -> place text below the point
+                ax=0, ay=-25  # negative -> above
             )
+
+        # BT/AR flag at bottom (below Bottom EL); show only if non-empty
+        for xi, yb, flag in zip(x, bot, flags):
+            flag_str = str(flag).strip()
+            if flag_str and flag_str.lower() != 'nan':
+                fig.add_annotation(
+                    x=xi, y=yb,
+                    text=flag_str,
+                    showarrow=False,
+                    yshift=18  # place text below the bottom
+                )
+        # ----------------------------------------------------------
 
         # ---------- Proposed positions: name + location only, at bottom ----------
         if proposed is not None and not proposed.empty:
@@ -482,7 +495,7 @@ else:
                 ymin = float(np.nanmin(bot))
                 ymax = float(np.nanmax(top))
                 yrng = max(ymax - ymin, 1.0)
-                y_marker = ymin - max(0.03 * yrng, 5.0)  # below bottom
+                y_marker = ymin - max(0.03 * yrng, 5.0)  # slightly below bottom
 
                 fig.add_trace(go.Scatter(
                     x=xprop,
@@ -498,7 +511,7 @@ else:
                 pad = max(0.06 * yrng, 10.0)
                 fig.update_yaxes(range=[ymin - pad, ymax + pad])
         else:
-            # still pad a little so bottom labels aren't clipped
+            # still pad a little so top/bottom labels aren't clipped
             ymin = float(np.nanmin(bot))
             ymax = float(np.nanmax(top))
             pad = max(0.04 * (ymax - ymin), 8.0)
