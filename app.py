@@ -1,4 +1,4 @@
-# Borehole Visualization Tool — Names at TOP, AR/BR styled at feature elevation, Proposed at TOP
+# Borehole Visualization Tool — PWR bridging, AR/BR styled at feature elevation, Proposed at TOP
 # Units: FEET
 
 import pandas as pd
@@ -125,7 +125,7 @@ if uploaded_file:
     # BT/AR flag column (as in your sheet)
     c_bt_ar  = pick(df.columns, 'bt/ar', 'br/ar')
 
-    # Build dataframe (ft)
+    # Build dataframe (feet)
     data = pd.DataFrame({
         'Name': df[c_name],
         'Latitude': df[c_lat],
@@ -204,7 +204,7 @@ with st.expander("Tip", expanded=True):
     st.write("Use the **polyline tool** on the map to draw your section. Double-click to finish. Popups/labels are in **ft**.")
     st.caption("Blue = existing borings (main file). Red = proposed borings (optional upload).")
 
-# Center map on whichever datasets are present
+# Center map
 lat_series = pd.Series(dtype=float)
 lon_series = pd.Series(dtype=float)
 if data is not None and not data.empty:
@@ -322,7 +322,7 @@ if data is None or data.empty:
     st.info("Upload the **Main Borehole** file to enable the Section/Profile and 3D views.")
     st.stop()
 
-st.header("📈 Section / Profile (ft) — Names at top; AR/BR styled at feature; Proposed names at top")
+st.header("📈 Section / Profile (ft) — PWR bridging; Names at top; AR/BR styled; Proposed at top")
 
 corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
 
@@ -331,7 +331,7 @@ cA, cB, cC = st.columns([1,1,1])
 with cA:
     ar_color = st.color_picker("AR label color", value="#7F1D1D")   # maroon-ish
 with cB:
-    br_color = st.color_picker("BR label color", value="#1E40AF")   # blue-ish
+    br_color = st.color_picker("BR label color", value="#7C3AED")   # purple-ish (match screenshot feel)
 with cC:
     flag_font_size = st.slider("AR/BR font size", 8, 22, 12, step=1)
 flag_yshift_px = st.slider("AR/BR vertical offset (px)", -20, 40, -6, step=1,
@@ -383,19 +383,28 @@ else:
         lower_soil = np.where(np.isnan(pwr), bot, pwr)
         add_band(fig, x, top, lower_soil, "rgba(34,197,94,0.55)", "Soil", True, "soil")
 
-        # PWR band to Bottom
+        # --- PWR filled band to Bottom (bridged across neighbors without PWR) ---
         mask_pwr = ~np.isnan(pwr)
+        n = len(x)
         first_pwr_band = True
-        if mask_pwr.any():
-            idx = np.where(mask_pwr)[0]
+
+        mask_dilated = np.zeros(n, dtype=bool)
+        idx_true = np.where(mask_pwr)[0]
+        for i in idx_true:
+            mask_dilated[i] = True
+            if i > 0:     mask_dilated[i-1] = True
+            if i < n - 1: mask_dilated[i+1] = True
+
+        if mask_dilated.any():
+            idx = np.where(mask_dilated)[0]
             splits = np.where(np.diff(idx) > 1)[0]
             segments = np.split(idx, splits + 1)
             for seg in segments:
                 xs  = x[seg]
-                y_up = pwr[seg]
-                y_lo = bot[seg]
-                add_band(fig, xs, y_up, y_lo, "rgba(127,29,29,0.70)",
-                         "PWR", showlegend=first_pwr_band, legendgroup="pwrband")
+                yup = np.where(mask_pwr[seg], pwr[seg], bot[seg])  # bridge
+                ylo = bot[seg]
+                add_band(fig, xs, yup, ylo, "rgba(127,29,29,0.70)", "PWR",
+                         showlegend=first_pwr_band, legendgroup="pwrband")
                 first_pwr_band = False
 
         # Posts
@@ -421,7 +430,7 @@ else:
             hovertemplate="Bottom EL (ft): %{y:.2f}<extra></extra>"
         ))
 
-        # PWR line & markers
+        # PWR line & markers only where PWR exists
         if mask_pwr.any():
             first_pwr_line = True
             idx = np.where(mask_pwr)[0]
@@ -484,9 +493,9 @@ else:
         for xi, btm, br_el, ar_el, flag in zip(x, bot, br, ar, flags):
             if not flag or flag == "NAN":
                 continue
-            # normalize BT -> BR
-            if flag == "BT":
+            if flag == "BT":  # normalize
                 flag = "BR"
+
             if flag == "AR" and not np.isnan(ar_el):
                 y_anchor = ar_el
                 color = ar_color
@@ -539,7 +548,6 @@ else:
                 pad_bot = max(0.04 * yrng, 8.0)
                 fig.update_yaxes(range=[ymin - pad_bot, ymax + pad_top])
         else:
-            # Generic padding so top/bottom labels aren't clipped
             ymin = float(np.nanmin(bot))
             ymax = float(np.nanmax(top))
             pad_top = max(0.06 * (ymax - ymin), 10.0)
