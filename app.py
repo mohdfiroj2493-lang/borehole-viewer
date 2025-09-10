@@ -1,4 +1,4 @@
-# Borehole Visualization Tool — Names at TOP, BT/AR on bottom row, Proposed names at TOP too
+# Borehole Visualization Tool — Names at TOP, BT/AR at BOTTOM
 # Units: FEET
 
 import pandas as pd
@@ -174,7 +174,7 @@ if uploaded_file:
 proposed = None
 if proposed_file:
     pdf = pd.read_excel(proposed_file)
-    pdf.columns = [c.strip().lower() for c in df.columns] if uploaded_file else [c.strip().lower() for c in pdf.columns]
+    pdf.columns = [c.strip().lower() for c in pdf.columns]
     p_name = pick(pdf.columns, 'name', 'id', 'boring id', 'hole id')
     p_lat  = pick(pdf.columns, 'latitude', 'lat')
     p_lon  = pick(pdf.columns, 'longitude', 'lon', 'long')
@@ -322,7 +322,7 @@ if data is None or data.empty:
     st.info("Upload the **Main Borehole** file to enable the Section/Profile and 3D views.")
     st.stop()
 
-st.header("📈 Section / Profile (ft) — Names at top, BT/AR on a bottom row (+ Proposed names at top)")
+st.header("📈 Section / Profile (ft) — Names at top, BT/AR at bottom (+ Proposed locations)")
 
 corridor_ft = st.slider("Corridor width (ft)", 25, 1000, 200, step=25)
 
@@ -457,7 +457,7 @@ else:
                 hovertemplate="AR EL (ft): %{y:.2f}<extra></extra>"
             ))
 
-        # ----- Labels -----
+        # ----- Labels: Name at TOP; BT/AR flag ONLY at BOTTOM -----
         flags = sec["BT_AR_Flag"].astype(str).str.strip() if "BT_AR_Flag" in sec.columns else pd.Series([""]*len(sec))
 
         # Name at top (above Top EL)
@@ -466,36 +466,22 @@ else:
                 x=xi, y=yt,
                 text=str(label),
                 showarrow=True, arrowhead=1, arrowsize=1,
-                ax=0, ay=-25  # above
+                ax=0, ay=-25  # negative -> above
             )
 
-        # BT/AR flags along one bottom-row baseline (like your screenshot)
-        ymin = float(np.nanmin(bot))
-        ymax = float(np.nanmax(top))
-        yrng = max(ymax - ymin, 1.0)
-        y_flag = ymin - max(0.035 * yrng, 8.0)  # a little below the bottom envelope
-
-        x_flags = []
-        txt_flags = []
-        for xi, flag in zip(x, flags):
-            s = str(flag).strip()
-            if s and s.lower() != 'nan':
-                x_flags.append(xi)
-                txt_flags.append(s)
-
-        if x_flags:
-            fig.add_trace(go.Scatter(
-                x=x_flags,
-                y=[y_flag] * len(x_flags),
-                mode="text",
-                text=txt_flags,
-                textposition="middle center",
-                textfont=dict(size=12),
-                showlegend=False
-            ))
+        # BT/AR flag at bottom (below Bottom EL); show only if non-empty
+        for xi, yb, flag in zip(x, bot, flags):
+            flag_str = str(flag).strip()
+            if flag_str and flag_str.lower() != 'nan':
+                fig.add_annotation(
+                    x=xi, y=yb,
+                    text=flag_str,
+                    showarrow=False,
+                    yshift=18  # place text below the bottom
+                )
         # ----------------------------------------------------------
 
-        # ---------- Proposed positions ----------
+        # ---------- Proposed positions: name + location only, at bottom ----------
         if proposed is not None and not proposed.empty:
             XYp_m = np.array([transformer.transform(lon, lat)
                               for lat, lon in zip(proposed["Latitude"], proposed["Longitude"])])
@@ -506,8 +492,11 @@ else:
                 prop_sec["Chainage_ft"] = chain_p_ft[keep_p]
                 xprop = prop_sec["Chainage_ft"].to_numpy()
 
-                # bottom red triangles
-                y_marker = ymin - max(0.02 * yrng, 5.0)
+                ymin = float(np.nanmin(bot))
+                ymax = float(np.nanmax(top))
+                yrng = max(ymax - ymin, 1.0)
+                y_marker = ymin - max(0.03 * yrng, 5.0)  # slightly below bottom
+
                 fig.add_trace(go.Scatter(
                     x=xprop,
                     y=[y_marker] * len(xprop),
@@ -518,26 +507,16 @@ else:
                     name="Proposed (location)",
                     hovertemplate="<b>%{text}</b><br>Chainage: %{x:.1f} ft<extra></extra>"
                 ))
-
-                # names at TOP as well
-                y_prop_top = ymax + max(0.03 * yrng, 5.0)
-                fig.add_trace(go.Scatter(
-                    x=xprop,
-                    y=[y_prop_top] * len(xprop),
-                    mode="text",
-                    text=prop_sec["Name"].astype(str),
-                    textposition="top center",
-                    showlegend=False
-                ))
-
-                # Expand y-range to fit top names & bottom rows
-                pad = max(0.08 * yrng, 12.0)
+                # expand y-axis to ensure visibility of bottom markers/labels
+                pad = max(0.06 * yrng, 10.0)
                 fig.update_yaxes(range=[ymin - pad, ymax + pad])
         else:
-            # Still pad so both top names and bottom flags are visible
-            pad = max(0.06 * yrng, 10.0)
+            # still pad a little so top/bottom labels aren't clipped
+            ymin = float(np.nanmin(bot))
+            ymax = float(np.nanmax(top))
+            pad = max(0.04 * (ymax - ymin), 8.0)
             fig.update_yaxes(range=[ymin - pad, ymax + pad])
-        # ---------------------------------------
+        # ------------------------------------------------------------------------
 
         # Unified vertical tooltip + spike
         fig.update_layout(
